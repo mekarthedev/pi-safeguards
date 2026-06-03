@@ -1,0 +1,166 @@
+# TODO
+
+- what "ask" should be replaced with in non-interactive mode?
+- protect specific line numbers, especially with temporary safeguards from the skill
+    - "edit:L17-40": "ask", "edit:!L45-100": "deny"
+    - how to keep track of line numbers after a few edits?
+- "ask" - make llm explain, why it needs the access
+- rules per scm branch
+- when project-level config present, should "." & ".." be relative to project root and not cwd (like gitignore) ?
+- os.homedir() vs os.userInfo().homedir
+    - `sudo -u foo pi` - who's config should be used?
+    - protect other users with "~/../**:!~/**": "deny!" ?
+- "~" for $HOME vs "~~" for effective system user home
+
+# Features
+
+- rule: "path-pattern:!except-path-pattern": { "tool-pattern:!except-tool-pattern": "permission[!]" }
+    - by default "read" also affects bash grep, rg, ls(if folder), cat, cp(from), mv(from), <(from)
+    - by default "write" also affects "edit", bash rm, cp(to), mv(both), mkdir, >(to)
+    - by default "edit" also affects "write", bash cp(to), mv(to), mkdir, >(to) (e.g. yarn.lock), but not bash rm or mv(from)
+    - shorthand syntax:
+        - "path": "permission" = "path": { "*": "permission" }
+        - "nowrite" = "readonly" = { "write": "deny" }
+            - case: {"../": "deny", ".git/": "readonly"} might give unexpected result for "../.git"
+        - "askwrite" = { "write": "ask" }
+        - "noedit" = { "edit": "deny" } - note: same? as { "write:!bash mv:!bash rm"}
+        - "askedit" = { "edit": "ask" }
+        - "noread" = "writeonly" = { "read": "deny" }
+    - exceptions: ".ssh/**:!*.pub": "deny" - meaning this rule should be skipped for "*.pub"
+    - rules are checked from bottom to top, first rule with matching path and tool wins
+    - "permission!" makes rule both high priority and strict, e.g. "pi-safeguards.json": "readonly!"
+        - high priority = the rule is checked before any non-high priority rule
+        - strict = matching doesn't stop: all strict rules are checked -> most strict wins
+        - to prevent unintetional overriding by e.g. ".." or "*.json"
+        - full syntax: "a": { "b": "allow!", "c": "deny!" }
+    - if no rule for the tool, then go to next path pattern
+    - if no matchin rule -> default pi behavior = "allow", or some other extension
+    - "edit": "ask" - when asking, present the user with the proposed diff
+        - an option to open diff in external tool
+- path pattern:
+    - "*" for exactly one path segment, "**" for zero or more path segments, "?" for exactly one char
+        - "*" is zero or more characters, including leading dots (unlike bash)
+            - "/*/" requires at least one character
+        - "xxx/**" includes "xxx" itself
+        - "xxx/**.x" is unsupported, use "xxx/**/*.x" instead
+        - "**/xxx" is equivalent to "xxx" (except cases like **/.. and **/~)
+    - trailing `/` -> do "dir check": don't match if the path points to a non-directory, otherwise -> don't do dir check
+        - "dir/" matches only "dir", and not its children (unlike gitignore, use "dir/**")
+        - "dir/**" matches anything within dir, but matches dir itself only if its not a non-directory
+        - if path doesn't exist -> assume it matches the dir check
+            - for some bash commands assume type based on the command:
+                - mkdir -> directory, cat -> non-directory
+        - e.g. "dir/**:!dir/**/" - match only non-directories within "dir"
+        - e.g. { "dir/": "readonly", "dir/**/*": "allow" } - can't touch the folder, but can touch its contents
+    - "." & ".." for cwd, "~" for home, "/" for fs root (unlike gitignore)
+        - "./xxx" is not the same as "xxx" (which is equivalent to "**/xxx")
+        - "xxx/../../y" makes it "y", not "../y"
+    - "\\*" for escaping
+- exec/bash: "command-pattern:!except-pattern": { "subcommand-pattern": "permission" }
+    - command patterns are matched structuraly
+- (quasi-)security / safeguards for safegards:
+    - config file is "readonly!" by default
+    - next rule overrides previous rule, even if previous is stricter
+    - when "bash" and "paths" both match -> stricter wins
+    - project vs user config:
+        - by default: stricter rule wins (e.g. running with untrusted 3rd party config)
+        - /safeguards:trust command to allow project config to override parent/user config, normal priority only
+- config lint:
+    - "*" pattern, if present, must be the first one in the list, and must not be of high priority
+    - /safeguards:lint for additional checks:
+        - check "xxx/**" is after "xxx/"
+- "safegards help steering" philosophy
+    - guaranteeing strict access controll, i.e. sandboxing, is a non-goal
+        - llm accidentally bypassing safeguards is not the end of the world as long as it's reminded of the rules in time
+    - explain to the agent what is it allowed to do
+    - a skill to allow llm make temporary safeguards for itself.
+        - e.g. when prompting like "safeguard implementation files from changes, only write tests"
+- non-goals:
+    - sandboxing
+    - preventing home spoofing: $HOME vs actual process user home
+    - preventing accidents in custom scripts. Will only check paths used in tool calls
+    - recursively checking subfolders for e.g. rm -rf. Will only check explicitly mentioned paths
+    - checking if the tool is "appropriate" for the path:
+        - e.g. with "*.sqlite": "deny", even "sqlite" cmd is not allowed to touch the files.
+        - use "*.sqlite": { "*:!bash sqlite": "deny" } if needed
+- caveats:
+    - dir-check for non-existing paths always matches
+    - home is the same home as for the user config json, not the actual system user home
+
+
+# History
+
+## Simplified pattern matching
+
+Pattern: | Old behavior:      | New behavior:      | New equivalent for old behavior:
+x/       | x(d) or x/y/z(f|d) | x(d)               | x/**
+x/**     | x/y/z(f|d)         | x(d) or x/y/z(f|d) | x/**/*
+x        | x(f)               | x(f|d)             | x:!*/
+*:!*/    | - (see old x/)     | x(f) or y(f)       | -
+x/**/    | x/y(d) or x/y/z(d) | x(d) or x/y/z(d)   | x/**/*/
+
+## Dir check for non-existent paths
+
+A tool is called with "x" path, type is unknown, e.g. bc it doesn't exist.
+Should the following rules match or skip the path for `cmd x`?
+
+pattern   |           ideally               |                    implementation
+    input | node_modules | package.json     | something[/] (dir-like)  | something.json (file-like)
+x/        |  match       |  skip (notice /) |  match(#)(1)             |
+*:!x/     |  skip        |  match           |  skip(#)(1)              |  
+*:!x/**   |  skip        |  match           |  skip(#)(1)              |
+*/        |  match       |  skip            |  match(#)/skip(!)        |  skip(#)
+*:!*/ (?) |  skip        |  match           |  skip(#)                 |
+x:!*/     |  skip?       |  match           |  match(!)(2)             |  match(#)
+
+(!) - strict dir check = only if actually dir
+(#) - guess dir check = only if at least guessed to be dir
+(1) - user wrote "something/" pattern -> something is expected to be a possible dir
+        - vs "it could be either"
+(2) - x mentioned explicitly
+(?) - "nowrite" = "can only create files" vs ???
+
+For some actions type of path is known even if path doesn't exist:
+- must be file: read, write, edit, cp/rm (without -r), touch
+- must be dir: mkdir
+
+Use heuristic for name: `.+\.(?!d$)[a-zA-Z]+$` and no trailing-/ -> guess it's a file, otherwise guess dir
+
+Spawn subagent to ask it if the path is expected to be a directory or a file?
+
+Solution (basically postpone the problem):
+- Remove "strict" mode. Remove "unknown" type.
+- Guess type outside of pattern matching logic. Guess by name. Make a part of other guessing logic (guessing by tool used).
+
+Make match return true|false|unknown
+
+match->unknown only possible if (a) dir check was requested and (b) target type is unknown (noent)
+
+Situations for unknown result:
+1. main regex match, main required dir check, all exceptions regexes didn't match
+   - x/       | match(2)
+   - x/:!*.y  | match(2)
+2. main regex match, no main dir check, exception regex matched but required dir check
+              | something.json | something[/] | no strict checks solution
+   - x:!x/    | match          | match(1)     | skip
+   - x:!x/**  | match          | match(1)     | skip
+   - x:!*/    | match(2)       | match(1)     | skip
+   - *:!x/    | skip(2)        | skip(2)      | 
+   - *:!x/**  | skip(2)        | skip(2)
+   - *:!*/    | match(1)       | match(1)
+
+(1) - just in case
+(2) - not a wildcard -> in practice it's a name for a known type
+
+Examples:
+- "node_modules/**": "ask", "*:!node_modules/**": "deny". Then rm -rf node_modules
+- "package.json:!*/": "ask". Then rm -rf package.json - note that file doesn't exist
+- "*": "deny", "notes.txt:!*/": "allow" -> files cannot be created
+- If guessing by name: "*": "deny", "*:!f.txt/": "allow". Then mkdir f.txt -> guessed f.txt to be a file -> created "f.txt" dir despite "deny"
+
+non-existent paths can only be created = nothing(?) to loose when skipping rules with dir-checked exceptions
+
+Solution: No strict dir check. "*:!*/" always skipped unless known to be a file
+
+For "Caveats" section:
+- */ may not check if the path is actually a directory when the path in question doesn't exist, making rules like "xxx:!*/" be skipped if xxx doesn't exist

@@ -1,0 +1,47 @@
+{
+    "paths": {
+        "*": "askwrite",
+        "./**": "allow",
+        "./": "askwrite",
+        "pi-safeguards.json": "readonly!",
+
+        "*.env": "deny",
+        "*.env.*:!*.env.example": "deny",
+
+        ".ssh/**:!*.pub": "deny!",
+        "*_rsa": "deny",
+        "*_ed25519": "deny",
+        "*.pem": "deny",
+        "*.crt": "deny",
+        "*.key": "deny",
+        "*.p12": "deny",
+
+        ".git/**": "readonly",
+
+        "node_modules/**": "noedit",
+        "package-lock.json": "noedit",
+        "yarn.lock": "noedit",
+        "bun.lock": "noedit",
+
+        "*.log": "noedit",
+        "*.db": "noedit",
+        "*.sqlite": { "edit:!bash sqlite": "deny" },
+        "*.sqlite3": { "edit:!bash sqlite": "deny" }
+    },
+
+    "bash": {
+        "sudo": "deny!",
+        "su": "deny!",
+        "chown": "ask!",
+        "chmod": "ask!",
+        "ssh*": "ask!",
+
+        "rm -rf": "ask",
+        "rm --recursive": "ask",
+
+        "git:!git status:!git diff:!git log": "ask",
+        "npm": { "install": "ask", "add": "ask", "i": "ask" },
+        "yarn": { "install": "ask", "add": "ask", "i": "ask" },
+        "bun": { "install": "ask", "add": "ask", "i": "ask" }
+    }
+}
