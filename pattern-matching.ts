@@ -6,6 +6,11 @@ export const matchAnyDirectory: PathMatcher = () => () => (_, isDir) => isDir !=
 
 // segments is always non-empty, only first segment can be ""
 type NormalForm = { segments: string[], relativePrefixLen: number, onlyDir: boolean }
+
+// How is this different from standard `node:path.normalize`?
+// - x/**/.. is equivalent to x/**, not x
+// - x is equivalent to **/x, not ./x
+// - x/../../y is equivalent to y, not ../y
 export function normalize(pattern: string): NormalForm {
     if (pattern === "") { return { segments: ["*"], relativePrefixLen: 0, onlyDir: false } }
 

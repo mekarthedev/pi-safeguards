@@ -57,7 +57,9 @@
         - "xxx/../../y" makes it "y", not "../y"
     - "\\*" for escaping
 - exec/bash: "command-pattern:!except-pattern": { "subcommand-pattern": "permission" }
-    - command patterns are matched structuraly
+    - command patterns are matched structuraly-
+    - handle cmd && cmd || cmd
+    - resolve cwd in case of `cd some && cd where && bash`
 - (quasi-)security / safeguards for safegards:
     - config file is "readonly!" by default
     - next rule overrides previous rule, even if previous is stricter
@@ -80,6 +82,7 @@
     - preventing home spoofing: $HOME vs actual process user home
     - preventing accidents in custom scripts. Will only check paths used in tool calls
     - recursively checking subfolders for e.g. rm -rf. Will only check explicitly mentioned paths
+    - analyzing branches of bash command execution: `(cp x && cd a || cd b) && cat y` - is it a/y or b/y?
     - checking if the tool is "appropriate" for the path:
         - e.g. with "*.sqlite": "deny", even "sqlite" cmd is not allowed to touch the files.
         - use "*.sqlite": { "*:!bash sqlite": "deny" } if needed
