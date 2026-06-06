@@ -2,12 +2,10 @@
   "compilerOptions": {
     "target": "esnext",
     "lib": ["esnext"],
-    "typeRoots": [
-      "../../../../.bun/install/global/node_modules/@types",
-    ],
     "types": ["bun"],
 
     "strict": true,
+    "noImplicitAny": true,
     "noImplicitReturns": true,
     "noImplicitOverride": true,
     "noUnusedLocals": true,

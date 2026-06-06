@@ -1,5 +1,5 @@
 import { expect, test, describe } from "bun:test"
-import { makeMatcher, normalize } from "./pattern-matching"
+import { makeMatcher, normalize } from "./path-matching"
 
 // MARK: normalize
 describe("normalize", () => {

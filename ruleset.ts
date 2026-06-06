@@ -1,4 +1,4 @@
-import { type PathMatcher, makeMatcher } from "./pattern-matching"
+import { type PathMatcher, makeMatcher } from "./path-matching"
 
 import path from "node:path"
 import url from "node:url"

@@ -1,5 +1,6 @@
 import { loadConfig } from "./config-loading"
 import { makeRuleset, resolvePath, resolveRule } from "./ruleset"
+import { sequenceScript } from "./tool-matching"
 
 import { type ExtensionAPI, getAgentDir } from "@earendil-works/pi-coding-agent"
 import fs from "node:fs"
@@ -17,28 +18,64 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("tool_call", async (event, ctx) => {
         const input = event.input
-        if (!("path" in input) || typeof input.path !== "string") { return }
-        const protectedTarget = resolvePath({ homeDir }, ctx.cwd, input.path)
-        const targetStat = fs.statSync(protectedTarget, { throwIfNoEntry: false })
-        const targetIsDir = targetStat && targetStat.isDirectory()
+        const actions = [
+            ...("path" in input && typeof input.path === "string" ? [{ op: event.toolName, args: [input.path] }] : []),
+            ...("command" in input && typeof input.command === "string" ? sequenceScript(input.command) : [])
+        ]
 
         const cwd = resolvePath({ homeDir }, ctx.cwd)
-
-        const matchedRule = resolveRule(rules, cwd, protectedTarget, targetIsDir, event.toolName)
-        if (matchedRule === undefined) { return undefined }
-        ctx.ui.notify(`[pi-safeguards]\n${event.toolName} ${protectedTarget}\nrule: ${matchedRule.pathRule.pattern} -> ${matchedRule.toolRule.pattern} -> ${matchedRule.permission}`, "info")
-
-        if (matchedRule.permission === "ask") {
-            if (!ctx.hasUI) {
-                return { block: true, reason: `[pi-safeguards] Requires user approval, but environment is non-interactive` }
+        const ruledActions = []
+        for (const action of actions) {
+            for (const arg of action.args) {
+                const targetPath = resolvePath({ homeDir }, ctx.cwd, arg)
+                const targetStat = fs.statSync(targetPath, { throwIfNoEntry: false })
+                const targetIsDir = targetStat && targetStat.isDirectory()
+                const rule = resolveRule(rules, cwd, targetPath, targetIsDir, action.op)
+                if (rule !== undefined) {
+                    ruledActions.push({ op: action.op, arg, rule})
+                }
             }
-            const choice = await ctx.ui.select(`[pi-safeguards]\n\n${event.toolName} ${protectedTarget}\n\nAllow?`, ["Yes", "No"])
-            if (choice !== "Yes") {
+        }
+
+        ctx.ui.notify(
+            "[pi-safeguards]\n" + ruledActions
+                .map(action => `${action.op} ${action.arg}\n${action.rule.pathRule.pattern} -> ${action.rule.toolRule.pattern} -> ${action.rule.permission}`)
+                .join("\n"),
+            "info"
+        )
+
+        const deniedAction = ruledActions.find(action =>
+            action.rule.permission === "deny" || !ctx.hasUI && action.rule.permission === "ask"
+        )
+        if (deniedAction) {
+            if (deniedAction.rule.permission === "ask") {
+                return {
+                    block: true,
+                    reason: `[pi-safeguards] "${deniedAction.op} ${deniedAction.arg}" requires user approval, but environment is non-interactive`
+                }
+            }
+            return {
+                block: true,
+                reason: `[pi-safeguards] Agent is not supposed to call "${deniedAction.op}" with "${deniedAction.arg}"`
+            }
+        }
+        const approvalRequests = ruledActions.filter(action => action.rule.permission === "ask")
+        for (const [i, action] of approvalRequests.entries()) {
+            const totalRequests = approvalRequests.length
+            const choice = await ctx.ui.select(
+                `[pi-safeguards]\n\n${action.op} ${action.arg}\n\nAllow?${totalRequests > 1 ? ` (${i+1}/${totalRequests})` : ""}`,
+                i+1 < totalRequests ? ["Allow", "Allow all", "Deny"] : ["Allow", "Deny"]
+            )
+            if (choice === undefined) {
+                return { block: true, reason: `[pi-safeguards] Cancelled by user` }
+            }
+            if (choice === "Deny") {
                 return { block: true, reason: `[pi-safeguards] Blocked by user` }
             }
-        } else if (matchedRule.permission === "deny") {
-            return { block: true, reason: `[pi-safeguards] Agent is not supposed to do this` }
+            if (choice === "Allow all") {
+                break
+            }
         }
-		return undefined
+        return undefined
 	})
 }

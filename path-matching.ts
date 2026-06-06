@@ -1,4 +1,4 @@
-// cwd is expected to be absolute
+// home and cwd are expected to be absolute
 export type PathMatcher = (home: string) => (cwd: string) => (target: string, isDir: boolean|undefined) => boolean
 
 export const matchAnything: PathMatcher = () => () => () => true
