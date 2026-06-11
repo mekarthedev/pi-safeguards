@@ -1,7 +1,9 @@
-import { type PathMatcher, makeMatcher } from "./path-matching"
+import { type PathMatcher, makePathMatcher } from "./path-matching"
+import { type Command, type ToolMatcher, makeToolMatcher } from "./tool-matching"
 
 import path from "node:path"
 import url from "node:url"
+import fs from "node:fs"
 
 const permissionShorthands = {
     "deny": { "*": "deny" },
@@ -20,21 +22,13 @@ type PermissionShorthandBase = keyof typeof permissionShorthands
 type PermissionShorthand = PermissionShorthandBase | `${PermissionShorthandBase}!`
 export type ConfigJson = { paths: Record<string, PermissionShorthand | Record<string, Permission> > }
 
-type ToolRule = { match: (tool: string) => boolean, permission: Permission, pattern: string, }
+type ToolRule = { match: ToolMatcher, permission: Permission, pattern: string, }
 type PathRule = { match: ReturnType<PathMatcher>, toolRules: ToolRule[], pattern: string, }
 export type Ruleset = Record<string, PathRule[]>
 
-function makeToolMatcher(pattern: string): ToolRule["match"] {
-    // todo
-    if (pattern.includes(":!")) {
-        const matchers = pattern.split(":!").map(subPattern => makeToolMatcher(subPattern))
-        return target => matchers[0](target) && !matchers.slice(1).some(m => m(target))
-    }
-    return target => target === pattern || pattern === "*" || pattern === ""
-}
-
 export function makeRuleset(homeDir: string, config: ConfigJson): Ruleset {
     const rules: Ruleset = { paths: [] }
+    // todo: numeric-like string keys are interpreted as numeric -> some rules might be out of order
     for (const [pathPattern, toolConfig] of Object.entries(config.paths).reverse()) {
 
         let expandedToolConfig: Record<string, Permission>
@@ -51,26 +45,51 @@ export function makeRuleset(homeDir: string, config: ConfigJson): Ruleset {
 
         const toolRules: ToolRule[] = []
         for (const [toolPattern, permission] of Object.entries(expandedToolConfig).reverse()) {
-            toolRules.push({ match: makeToolMatcher(toolPattern), permission, pattern: toolPattern })
+            toolRules.push({ match: makeToolMatcher(toolPattern, true), permission, pattern: toolPattern })
         }
-        rules.paths.push({ match: makeMatcher(pathPattern)(homeDir), toolRules, pattern: pathPattern })
+        rules.paths.push({ match: makePathMatcher(pathPattern)(homeDir), toolRules, pattern: pathPattern })
     }
 
     return rules
 }
 
-type RuleMatch = { pathRule: PathRule, toolRule: ToolRule, permission: Permission }
-export function resolveRule(rules: Ruleset, cwd: string, path: string, isDir: boolean|undefined, tool: string): RuleMatch|undefined {
+type RuleMatch = {
+    path: string,
+    isDir: boolean|undefined,
+    toolRule: ToolRule,
+    pathRule: PathRule,
+    permission: Permission,
+}
+export function resolveRule(
+    rules: Ruleset, pathOpts: PathResolutionOpts, cwd: string, command: Command
+): RuleMatch[] {
+    const ruledPaths = new Set<string>()
+    const matches = []
     for (const pathRule of rules.paths) {
-        if (pathRule.match(cwd)(path, isDir)) {
-            for (const toolRule of pathRule.toolRules) {
-                if (toolRule.match(tool)) {
-                    return { pathRule, toolRule, permission: toolRule.permission }
+        for (const toolRule of pathRule.toolRules) {
+            const capturedPaths = toolRule.match(command)
+            if (!capturedPaths) continue
+
+            for (const pathRaw of capturedPaths) {
+                const targetPath = resolvePath(pathOpts, cwd, pathRaw)
+                if (ruledPaths.has(targetPath)) continue
+
+                const stat = fs.statSync(targetPath, { throwIfNoEntry: false })
+                const targetIsDir = stat && stat.isDirectory()
+                if (pathRule.match(cwd)(targetPath, targetIsDir)) {
+                    ruledPaths.add(targetPath)
+                    matches.push({
+                        path: targetPath,
+                        isDir: targetIsDir,
+                        toolRule,
+                        pathRule,
+                        permission: toolRule.permission
+                    })
                 }
             }
         }
     }
-    return undefined
+    return matches
 }
 
 // Resolves to absolute path ready to be tested against path patterns.
@@ -78,7 +97,11 @@ export function resolveRule(rules: Ruleset, cwd: string, path: string, isDir: bo
 // - forces "/" as path separator
 // - expands ~-home
 // - converts from URL form
-export function resolvePath(opts: { homeDir?: string }, ...paths: string[]): string {
+type PathResolutionOpts = {
+    homeDir?: string,
+    stripDrive?: boolean,  // for testing
+}
+export function resolvePath(opts: PathResolutionOpts, ...paths: string[]): string {
     const expanded = paths.map(p => {
         if (opts.homeDir) {
             if (p === "~") { return opts.homeDir }
@@ -91,5 +114,10 @@ export function resolvePath(opts: { homeDir?: string }, ...paths: string[]): str
         }
         return p
     })
-    return path.resolve(...expanded).split(path.sep).join("/")
+    const absolutePath = path.resolve(...expanded).split(path.sep).join("/")
+    if (opts.stripDrive) {
+        const rootSep = absolutePath.indexOf("/")
+        return rootSep > 0 ? absolutePath.slice(rootSep) : absolutePath
+    }
+    return absolutePath
 }

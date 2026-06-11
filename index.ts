@@ -3,7 +3,6 @@ import { makeRuleset, resolvePath, resolveRule } from "./ruleset"
 import { sequenceScript } from "./tool-matching"
 
 import { type ExtensionAPI, getAgentDir } from "@earendil-works/pi-coding-agent"
-import fs from "node:fs"
 import path from "node:path"
 import os from "node:os"
 
@@ -25,45 +24,45 @@ export default function (pi: ExtensionAPI) {
 
         const cwd = resolvePath({ homeDir }, ctx.cwd)
         const ruledActions = []
-        for (const action of actions) {
-            for (const arg of action.args) {
-                const targetPath = resolvePath({ homeDir }, ctx.cwd, arg)
-                const targetStat = fs.statSync(targetPath, { throwIfNoEntry: false })
-                const targetIsDir = targetStat && targetStat.isDirectory()
-                const rule = resolveRule(rules, cwd, targetPath, targetIsDir, action.op)
-                if (rule !== undefined) {
-                    ruledActions.push({ op: action.op, arg, rule})
-                }
+        for (const command of actions) {
+            // todo: track cwd changes
+            for (const ruleMatch of resolveRule(rules, { homeDir }, cwd, command)) {
+                ruledActions.push({ cmd: command, permission: ruleMatch.permission, ruleMatch })
             }
         }
 
         ctx.ui.notify(
             "[pi-safeguards]\n" + ruledActions
-                .map(action => `${action.op} ${action.arg}\n${action.rule.pathRule.pattern} -> ${action.rule.toolRule.pattern} -> ${action.rule.permission}`)
+                .map(action =>
+                    `${action.cmd.op} ${action.cmd.args.join(" ")} → ${action.ruleMatch.path}\n` +
+                    `\t${action.ruleMatch.toolRule.pattern} → ${action.ruleMatch.pathRule.pattern} → ${action.permission}`
+                )
                 .join("\n"),
             "info"
         )
 
         const deniedAction = ruledActions.find(action =>
-            action.rule.permission === "deny" || !ctx.hasUI && action.rule.permission === "ask"
+            action.permission === "deny" || !ctx.hasUI && action.permission === "ask"
         )
         if (deniedAction) {
-            if (deniedAction.rule.permission === "ask") {
+            const cmdLine = deniedAction.cmd.op + " " + deniedAction.cmd.args.join(' ')
+            if (deniedAction.permission === "ask") {
                 return {
                     block: true,
-                    reason: `[pi-safeguards] "${deniedAction.op} ${deniedAction.arg}" requires user approval, but environment is non-interactive`
+                    reason: `[pi-safeguards] Command \`${cmdLine}\` when used with path \`${deniedAction.ruleMatch.path}\` requires user approval, but environment is non-interactive`
                 }
             }
             return {
                 block: true,
-                reason: `[pi-safeguards] Agent is not supposed to call "${deniedAction.op}" with "${deniedAction.arg}"`
+                reason: `[pi-safeguards] Command \`${cmdLine}\` shouldn't have been used with path \`${deniedAction.ruleMatch.path}\``
             }
         }
-        const approvalRequests = ruledActions.filter(action => action.rule.permission === "ask")
+        const approvalRequests = ruledActions.filter(action => action.permission === "ask")
         for (const [i, action] of approvalRequests.entries()) {
             const totalRequests = approvalRequests.length
             const choice = await ctx.ui.select(
-                `[pi-safeguards]\n\n${action.op} ${action.arg}\n\nAllow?${totalRequests > 1 ? ` (${i+1}/${totalRequests})` : ""}`,
+                `[pi-safeguards]\n\n${action.cmd.op} ${action.cmd.args.join(' ')} → ${action.ruleMatch.path}\n\n` +
+                `Allow?${totalRequests > 1 ? ` (${i+1}/${totalRequests})` : ""}`,
                 i+1 < totalRequests ? ["Allow", "Allow all", "Deny"] : ["Allow", "Deny"]
             )
             if (choice === undefined) {

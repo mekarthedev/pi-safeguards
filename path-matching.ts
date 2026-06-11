@@ -62,9 +62,9 @@ export function normalize(pattern: string): NormalForm {
     return { segments, relativePrefixLen, onlyDir }
 }
 
-export function makeMatcher(pattern: string): PathMatcher {
+export function makePathMatcher(pattern: string): PathMatcher {
     if (pattern.includes(":!")) {
-        const matchers = pattern.split(":!").map(subPattern => makeMatcher(subPattern))
+        const matchers = pattern.split(":!").map(subPattern => makePathMatcher(subPattern))
         return home => {
             const mainInHome = matchers[0](home)
             const exceptionsInHome = matchers.slice(1).map(e => e(home))

@@ -10,14 +10,24 @@
 - os.homedir() vs os.userInfo().homedir
     - `sudo -u foo pi` - who's config should be used?
     - protect other users with "~/../**:!~/**": "deny!" ?
-- "~" for $HOME vs "~~" for effective system user home
+    - "~" for $HOME vs "~~" for effective system user home
+- {edit: "deny", read: "allow"} vs "sed -i" - which permission wins?
+- absolute paths on windows:
+    - either recognizee "C:/**" pattern as absolute or require users to write "/C:/**"
+- known non-path arguments: "x": { "*": "ask" } shouldn't trigger on "echo x" or "git x"
+    - cd, basename/dirname, echo, printf, tar avz
+    - git $cmd, npm $cmd
 
 # Features
 
 - rule: "path-pattern:!except-path-pattern": { "tool-pattern:!except-tool-pattern": "permission[!]" }
-    - by default "read" also affects bash grep, rg, ls(if folder), cat, cp(from), mv(from), <(from)
-    - by default "write" also affects "edit", bash rm, cp(to), mv(both), mkdir, >(to)
-    - by default "edit" also affects "write", bash cp(to), mv(to), mkdir, >(to) (e.g. yarn.lock), but not bash rm or mv(from)
+    - "read" also affects:
+        - cp(from), mv(from), <, grep, rg, cat, tail, head, dd(if=), sed, cut, uniq(input), sort(input)
+    - "edit" also affects:
+        - "write" (only itself)
+        - cp(to), mv(to), mkdir, >, >>, dd(of=), sed(-i), uniq(output), sort(--output), truncate, tee, touch
+    - "write" is same as "edit", but also affects:
+        - rm, mv(from)
     - shorthand syntax:
         - "path": "permission" = "path": { "*": "permission" }
         - "nowrite" = "readonly" = { "write": "deny" }
@@ -27,7 +37,7 @@
         - "askedit" = { "edit": "ask" }
         - "noread" = "writeonly" = { "read": "deny" }
     - exceptions: ".ssh/**:!*.pub": "deny" - meaning this rule should be skipped for "*.pub"
-    - rules are checked from bottom to top, first rule with matching path and tool wins
+    - rules are checked from bottom to top, first rule (per targeted path) with matching path and tool wins
     - "permission!" makes rule both high priority and strict, e.g. "pi-safeguards.json": "readonly!"
         - high priority = the rule is checked before any non-high priority rule
         - strict = matching doesn't stop: all strict rules are checked -> most strict wins
@@ -93,6 +103,7 @@
 
 # History
 
+
 ## Simplified pattern matching
 
 Pattern: | Old behavior:      | New behavior:      | New equivalent for old behavior:
@@ -101,6 +112,7 @@ x/**     | x/y/z(f|d)         | x(d) or x/y/z(f|d) | x/**/*
 x        | x(f)               | x(f|d)             | x:!*/
 *:!*/    | - (see old x/)     | x(f) or y(f)       | -
 x/**/    | x/y(d) or x/y/z(d) | x(d) or x/y/z(d)   | x/**/*/
+
 
 ## Dir check for non-existent paths
 
