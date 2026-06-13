@@ -15,8 +15,9 @@
 - absolute paths on windows:
     - either recognizee "C:/**" pattern as absolute or require users to write "/C:/**"
 - known non-path arguments: "x": { "*": "ask" } shouldn't trigger on "echo x" or "git x"
-    - cd, basename/dirname, echo, printf, tar avz
+    - cd, basename/dirname, echo, printf, tar czvf
     - git $cmd, npm $cmd
+    - find ("find $1:!find * $1")
 
 # Features
 
@@ -67,9 +68,9 @@
         - "xxx/../../y" makes it "y", not "../y"
     - "\\*" for escaping
 - exec/bash: "command-pattern:!except-pattern": { "subcommand-pattern": "permission" }
-    - command patterns are matched structuraly-
-    - handle cmd && cmd || cmd
-    - resolve cwd in case of `cd some && cd where && bash`
+    - command patterns are matched structuraly
+    - `cmd && cmd || cmd` - every cmd is processed separately
+    - track cwd in case of `cd some && cd where && bash`
 - (quasi-)security / safeguards for safegards:
     - config file is "readonly!" by default
     - next rule overrides previous rule, even if previous is stricter
@@ -79,6 +80,7 @@
         - /safeguards:trust command to allow project config to override parent/user config, normal priority only
 - config lint:
     - "*" pattern, if present, must be the first one in the list, and must not be of high priority
+    - "sed *:!sort *" - mismatching command names -> exception does nothing
     - /safeguards:lint for additional checks:
         - check "xxx/**" is after "xxx/"
 - "safegards help steering" philosophy
@@ -93,9 +95,6 @@
     - preventing accidents in custom scripts. Will only check paths used in tool calls
     - recursively checking subfolders for e.g. rm -rf. Will only check explicitly mentioned paths
     - analyzing branches of bash command execution: `(cp x && cd a || cd b) && cat y` - is it a/y or b/y?
-    - checking if the tool is "appropriate" for the path:
-        - e.g. with "*.sqlite": "deny", even "sqlite" cmd is not allowed to touch the files.
-        - use "*.sqlite": { "*:!bash sqlite": "deny" } if needed
 - caveats:
     - dir-check for non-existing paths always matches
     - home is the same home as for the user config json, not the actual system user home

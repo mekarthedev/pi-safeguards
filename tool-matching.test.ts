@@ -155,13 +155,49 @@ describe("makeToolMatcher", () => {
                 ["git diff branch", undefined],
                 ["git diff branch bugfix", undefined],
             ]],
-            // todo: allow "dd if= of=" match "dd of= if=" -> "dd [--]if= [--]of=" ?
             ["dd of=$1", [
                 ["dd", undefined],
                 ["dd opt", undefined],
                 ["dd of=output", ["output"]],
                 ["dd if=input of=output count=42", ["output"]],
                 ["dd of=wrong of=output", ["wrong", "output"]],
+            ]],
+            ["git status $1", [
+                ["git status -- -rf --config other", ["-rf", "--config", "other"]],
+                ["git status --short -- --something", ["--something"]],
+                ["git status --short -- --short", ["--short"]],
+                ["git status --", undefined],
+            ]],
+        ])("%s", (pattern, cases) => {
+            const matcher = makeToolMatcher(pattern)
+            for (const [cmdLine, expectedMatches] of cases) {
+                const cmd = sequenceScript(cmdLine)[0]
+                expect(matcher(cmd), cmdLine).toStrictEqual(expectedMatches)
+            }
+        })
+    })
+
+    describe("unordered positionals", () => {
+        test.each<[string, [string, undefined|string[]][]]>([
+            ["dd [--]if=$1 [--]of=*", [  // still requires exact match, but not a positional anymore
+                ["dd", undefined],
+                ["dd opt", undefined],
+                ["dd if=input of=output", ["input"]],
+                ["dd if=input of=output count=42", ["input"]],
+                ["dd count=42 of=output if=input", ["input"]],
+                ["dd if input of=output", undefined],
+            ]],
+            ["tar [-]czf * $1", [  // still positional, but matches any order of letters
+                ["tar", undefined],
+                ["tar czf tar.gz input", ["input"]],
+                ["tar czvf tar.gz input", ["input"]],
+                ["tar fzc tar.gz input", ["input"]],
+                ["tar cz tar.gz input", undefined],
+                ["tar cf tar.gz input", undefined],
+                ["tar zf tar.gz input", undefined],
+                ["tar cz f tar.gz input", undefined],
+                ["tar cf z tar.gz input", undefined],
+                ["tar tar.gz czf input", undefined],
             ]],
         ])("%s", (pattern, cases) => {
             const matcher = makeToolMatcher(pattern)
@@ -189,7 +225,7 @@ describe("makeToolMatcher", () => {
                 ["rm file -r", undefined],
                 ["rm file -f", undefined],
             ]],
-            ["tail -f -n=", [
+            ["tail -f -n=17", [
                 ["tail", undefined],
                 ["tail -f", undefined],
                 ["tail -n", undefined],
@@ -202,12 +238,28 @@ describe("makeToolMatcher", () => {
                 ["tail -fn17", []],
                 ["tail -n 17 -f", []],
                 ["tail -n17 -f", []],
+                ["tail -f -n --", undefined],
+                ["tail -n -v -f 17", undefined],
             ]],
-            ["sort -n --output=$1", [
-                ["sort --output=dest", undefined],
-                ["sort -n --output=dst", ["dst"]],
-                ["sort -n --output dst", ["dst"]],
-                ["sort --output=dst -n", ["dst"]],
+            ["tail -n=*", [
+                ["tail", undefined],
+                ["tail -n", undefined],
+                ["tail -n 17", []],
+                ["tail -n17", []],
+                ["tail -fn 17", []],
+                ["tail -fn17", []],
+                ["tail -n --", undefined],
+                ["tail -n -f", undefined],
+            ]],
+            ["tail -n=$1", [
+                ["tail", undefined],
+                ["tail -n", undefined],
+                ["tail -n 17", ["17"]],
+                ["tail -n17", ["17"]],
+                ["tail -fn 17", ["17"]],
+                ["tail -fn17", ["17"]],
+                ["tail -n --", undefined],
+                ["tail -n -f", undefined],
             ]],
             ["cat -sn * $1 *", [
                 ["cat -sn", undefined],
@@ -217,6 +269,53 @@ describe("makeToolMatcher", () => {
                 ["cat -sn f1 f2 f3", ["f2"]],
                 ["cat -s f1 -n f2 f3", ["f2"]],
                 ["cat f1 -n f2 -s f3 f4", ["f2", "f3"]],
+            ]],
+            ["rm -r # [-r|--recursive]", [
+                ["rm", undefined],
+                ["rm -r", []],
+                ["rm --recursive", []],
+                ["rm -f --recursive", []],
+            ]],
+            ["sort $1 # [-o|--output=]", [
+                ["sort file", ["file"]],
+                ["sort --output dest file", ["file"]],
+                ["sort -o dest file", ["file"]],
+                ["sort --output=dest file", ["file"]],
+                ["sort -odest file", ["file"]],
+                ["sort --output dest", undefined],
+                ["sort -o dest", undefined],
+            ]],
+            ["sort -o * * # [-o=]", [
+                ["sort -o dest", undefined],
+                ["sort -o dest file", []],
+                ["sort file -o dest", []],
+                ["sort file -o", undefined],
+                ["sort file1 file2 file3 -o dest", []],
+                ["sort file1 file2 file3 -o", undefined],
+                ["sort -o", undefined],
+            ]],
+            ["sort -o * $1 # [-o=]", [
+                ["sort -o dest", undefined],
+                ["sort file -o dest", ["file"]],
+                ["sort file -o dest other", ["file", "other"]],
+                ["sort file", undefined],
+            ]],
+            ["sort -n --output=$1", [
+                ["sort --output=dest", undefined],
+                ["sort -n --output=dst", ["dst"]],
+                ["sort -n --output dst", ["dst"]],
+                ["sort --output=dst -n", ["dst"]],
+                ["sort -n --output", undefined],
+                ["sort --output -n", undefined],
+                ["sort -n --output -r", undefined],
+            ]],
+            ["sort -o=fixed -o=$1", [
+                ["sort -o fixed -o file", ["file"]],
+                ["sort -o file -o fixed", ["file"]],
+                ["sort -o fixed -o fixed", ["fixed"]],
+                ["sort -o other -o file", undefined],
+                ["sort -o fixed", undefined],
+                ["sort -o other", undefined],
             ]],
         ])("%s", (pattern, cases) => {
             const matcher = makeToolMatcher(pattern)
@@ -241,10 +340,28 @@ describe("makeToolMatcher", () => {
                 ["cat file left around right file", ["file"]],
                 ["cat file between file", undefined],
             ]],
-            ["sort -o=$1 $1", [  // sort in-place
-                ["sort file", undefined],
-                ["sort -o file file", ["file"]],
-                ["sort -o f2 f1 f2 f3", ["f2"]],
+            ["sort -o=$1 --files0-from=$1 # [-o|--output=]", [
+                ["sort -o file --files0-from file", ["file"]],
+                ["sort -o file -o other --files0-from other", ["other"]],
+                ["sort -o of1 --output of2 --files0-from of1 --files0-from other", ["of1"]],
+                ["sort -o file --files0-from other", undefined],
+                ["sort -o of1 -o of2 --files0-from other1 --files0-from other2", undefined],
+            ]],
+            ["sort -o $1 $1 # [-o|--output=]", [
+                ["sort -o path path", ["path"]],
+                ["sort -o out in", undefined],
+                ["sort -o out in out", ["out"]],
+                ["sort -o f1 -o f2 f1 f2", ["f1", "f2"]],
+                ["sort -o f1 --output f2 -o f3 f0 f1 f2 f3 f4", ["f1", "f2", "f3"]],
+            ]],
+            ["sort -o fixed -o $1 $1 # [-o=]", [
+                ["sort -o fixed -o path path", ["path"]],
+                ["sort -o path -o fixed path", ["path"]],
+                ["sort -o fixed -o path fixed", undefined],
+                ["sort -o path -o fixed fixed", undefined],
+                ["sort -o fixed -o fixed fixed", ["fixed"]],
+                ["sort -o fixed fixed", undefined],
+                ["sort -o path path", undefined],
             ]],
         ])("%s", (pattern, cases) => {
             const matcher = makeToolMatcher(pattern)
@@ -270,13 +387,20 @@ describe("makeToolMatcher", () => {
                 ["rm f1 f2", undefined],
                 ["rm f1 f2 f3 f4", undefined],
             ]],
-            ["rm *:!rm $1 *", [  // synthetic: $1 == * when no $1 in main
+            ["rm *:!rm $1 *", [
                 ["rm", undefined],
                 ["rm f1", []],
                 ["rm f1 f2", undefined],
                 ["rm f1 f2 f3", undefined],
             ]],
-            ["rm $1:!rm * $1 *:!rm * $1", [  // synthetic: $1-capture in multiple exceptions
+            ["rm $1:!rm * $1", [  // check first of the list of removed paths
+                ["rm", undefined],
+                ["rm f1", ["f1"]],
+                ["rm f1 f2", ["f1"]],
+                ["rm f1 f2 f3 f4", ["f1"]],
+                ["rm f0 f0 f0 f0", ["f0"]],
+            ]],
+            ["rm $1:!rm * $1 *:!rm * $1", [
                 ["rm", undefined],
                 ["rm f1", ["f1"]],
                 ["rm f1 f2", ["f1"]],
@@ -294,21 +418,49 @@ describe("makeToolMatcher", () => {
                 ["cp notenough", undefined],
                 ["cp", undefined],
             ]],
-            ["sort $1:!sort -o=$1", [  // non-in-place sort
+            ["sort $1:!sort -o=$1", [  // check non-output paths
                 ["sort dst", ["dst"]],
                 ["sort -o dst dst", undefined],
                 ["sort -o f3 f1 f2 f3", ["f1", "f2"]],
             ]],
-            ["sort $1:!sort * $1:!sort -o=$1", [  // check first sorted file in non-in-place sort
+            ["sort * $1:!sort -o=$1", [  // check non-output paths starting from second
+                ["sort dst", undefined],
+                ["sort -o dst dst", undefined],
+                ["sort -o f3 f1 f2 f3 f4", ["f2", "f4"]],
+                ["sort f1 f2 f3 f4 -o f3", ["f2", "f4"]],
+            ]],
+            ["sort -o $1:!sort * ignore # [-o=]", [
+                ["sort -o ignore", ["ignore"]],
+                ["sort other -o ignore", ["ignore"]],
+                ["sort -o some other ignore", undefined],
+                ["sort -o other", ["other"]],
+            ]],
+            ["sort -o $1:!sort -o=ignore", [
+                ["sort any other -o some", ["some"]],
+                ["sort any other -o ignore", undefined],
+            ]],
+            ["sort $1:!sort * $1:!sort -o=$1", [  // check first sorted file if it isn't output
                 ["sort dst", ["dst"]],
                 ["sort -o dst dst", undefined],
+                ["sort -o f2 f1 f2 f3", ["f1"]],
                 ["sort -o f3 f1 f2 f3", ["f1"]],
+                ["sort f1 f2 -o f3 f3", ["f1"]],
                 ["sort -o f1 f1 f2 f3", undefined],
             ]],
             ["git branch:!git branch *", [  // printing current branch
                 ["git branch", []],
                 ["git branch bugfix", undefined],
                 ["git branch --list", []],
+            ]],
+            [":!git", [
+                ["git", undefined],
+                ["git branch", undefined],
+                ["npm", []],
+            ]],
+            ["git:!", [
+                ["git", []],
+                ["git branch", []],
+                ["npm", undefined],
             ]],
         ])("%s", (pattern, cases) => {
             const matcher = makeToolMatcher(pattern)
@@ -339,6 +491,13 @@ describe("makeToolMatcher", () => {
                 ["cat", undefined],
                 ["cat f1", ["f1"]],
                 ["cat f1 f2 f3", ["f1", "f2", "f3"]],
+            ]],
+            ["sort -o #[-o=]", [
+                ["sort", undefined],
+                ["sort f1", undefined],
+                ["sort -o f1", undefined],
+                ["sort -o -- f1", ["f1"]],
+                ["sort f1 f2 -o f3", ["f1", "f2"]],
             ]],
             ["rm:!rm --dry-run", [
                 ["rm", undefined],
