@@ -270,11 +270,16 @@ describe("makeToolMatcher", () => {
                 ["cat -s f1 -n f2 f3", ["f2"]],
                 ["cat f1 -n f2 -s f3 f4", ["f2", "f3"]],
             ]],
-            ["rm -r # [-r|--recursive]", [
-                ["rm", undefined],
-                ["rm -r", []],
-                ["rm --recursive", []],
+            ["rm -rf # [-r|--recursive] [-f|--force]", [
                 ["rm -f --recursive", []],
+                ["rm --force -r", []],
+                ["rm --force --recursive", []],
+                ["rm -r -f", []],
+                ["rm --recursive", undefined],
+                ["rm --force", undefined],
+                ["rm -r", undefined],
+                ["rm -f", undefined],
+                ["rm", undefined],
             ]],
             ["sort $1 # [-o|--output=]", [
                 ["sort file", ["file"]],
@@ -393,41 +398,10 @@ describe("makeToolMatcher", () => {
                 ["rm f1 f2", undefined],
                 ["rm f1 f2 f3", undefined],
             ]],
-            ["rm $1:!rm * $1", [  // check first of the list of removed paths
-                ["rm", undefined],
-                ["rm f1", ["f1"]],
-                ["rm f1 f2", ["f1"]],
-                ["rm f1 f2 f3 f4", ["f1"]],
-                ["rm f0 f0 f0 f0", ["f0"]],
-            ]],
-            ["rm $1:!rm * $1 *:!rm * $1", [
-                ["rm", undefined],
-                ["rm f1", ["f1"]],
-                ["rm f1 f2", ["f1"]],
-                ["rm f1 f2 f3", ["f1"]],
-                ["rm f1 f2 f3 f4", ["f1"]],
-            ]],
             ["mv $1 dst:!mv dst *", [  // attemp to mv into specific destination
                 ["mv file dst", ["file"]],
                 ["mv f1 f2 f3 dst", ["f1", "f2", "f3"]],
                 ["mv dst other", undefined],
-            ]],
-            ["cp * $1:!cp $1 *", [  // check cp destination
-                ["cp from to", ["to"]],
-                ["cp f1 f2 f3 dir", ["dir"]],
-                ["cp notenough", undefined],
-                ["cp", undefined],
-            ]],
-            ["sort $1:!sort -o=$1", [  // check non-output paths
-                ["sort dst", ["dst"]],
-                ["sort -o dst dst", undefined],
-                ["sort -o f3 f1 f2 f3", ["f1", "f2"]],
-            ]],
-            ["sort * $1:!sort -o=$1", [  // check non-output paths starting from second
-                ["sort dst", undefined],
-                ["sort -o dst dst", undefined],
-                ["sort -o f3 f1 f2 f3 f4", ["f2", "f4"]],
-                ["sort f1 f2 f3 f4 -o f3", ["f2", "f4"]],
             ]],
             ["sort -o $1:!sort * ignore # [-o=]", [
                 ["sort -o ignore", ["ignore"]],
@@ -438,14 +412,6 @@ describe("makeToolMatcher", () => {
             ["sort -o $1:!sort -o=ignore", [
                 ["sort any other -o some", ["some"]],
                 ["sort any other -o ignore", undefined],
-            ]],
-            ["sort $1:!sort * $1:!sort -o=$1", [  // check first sorted file if it isn't output
-                ["sort dst", ["dst"]],
-                ["sort -o dst dst", undefined],
-                ["sort -o f2 f1 f2 f3", ["f1"]],
-                ["sort -o f3 f1 f2 f3", ["f1"]],
-                ["sort f1 f2 -o f3 f3", ["f1"]],
-                ["sort -o f1 f1 f2 f3", undefined],
             ]],
             ["git branch:!git branch *", [  // printing current branch
                 ["git branch", []],
@@ -468,6 +434,120 @@ describe("makeToolMatcher", () => {
                 const cmd = sequenceScript(cmdLine)[0]
                 expect(matcher(cmd), cmdLine).toStrictEqual(expectedMatches)
             }
+        })
+
+        describe("capture identity", () => {
+            test.each<[string, [string, undefined|string[]][]]>([
+                // only positinals in main, only positionals in exception -> exclude per positional index
+                ["edit $1 :! edit * $1", [  // check first of the list of processed paths
+                    ["edit first second third", ["first"]],
+                    ["edit first also first other", ["first"]],
+                    ["edit inplace inplace", ["inplace"]],
+                    ["edit some", ["some"]],
+                    ["edit", undefined],
+                ]],
+                ["cp * $1 :! cp $1 *", [  // check cp destination
+                    ["cp from to", ["to"]],
+                    ["cp f1 f2 f3 dir", ["dir"]],
+                    ["cp same same", ["same"]],
+                    ["cp notenough", undefined],
+                    ["cp", undefined],
+                ]],
+                ["rm $1 :! rm * $1 * :! rm * $1", [
+                    ["rm", undefined],
+                    ["rm f1", ["f1"]],
+                    ["rm f1 f2", ["f1"]],
+                    ["rm f1 f2 f3", ["f1"]],
+                    ["rm f1 f2 f3 f4", ["f1"]],
+                    ["rm same same same", ["same"]],
+                ]],
+
+                // only positionals in main, only opts in exception -> exclude per value
+                ["sort $1 :! sort -o=$1", [  // check non-output paths
+                    ["sort dst", ["dst"]],
+                    ["sort -o dst dst", undefined],
+                    ["sort -o f3 f1 f2 f3", ["f1", "f2"]],
+                ]],
+                ["sort * $1 :! sort -o=$1", [  // check non-output paths starting from second
+                    ["sort dst", undefined],
+                    ["sort -o dst dst", undefined],
+                    ["sort -o f3 f1 f2 f3 f4", ["f2", "f4"]],
+                    ["sort f1 f2 f3 f4 -o f3", ["f2", "f4"]],
+                ]],
+
+                // only positionals in main, positionals+opts in exception -> exclude per positional index
+                ["sort $1 :! sort -o=$1 * $1 *", [
+                    ["sort first middle last", ["first", "middle", "last"]],
+                    ["sort first middle last -o first", ["first", "middle", "last"]],
+                    ["sort first middle last -o middle", ["first", "last"]],
+                    ["sort first middle middle last", ["first", "middle", "last"]],
+                    ["sort first middle middle last -o middle", ["first", "last"]],
+                    ["sort first middle middle last -o middle -o first", ["first", "last"]],
+                    ["sort same same same -o same", ["same"]],
+                ]],
+                ["sort $1 :! sort * $1 :! sort -o=$1", [  // check first sorted file if it isn't output
+                    ["sort dst", ["dst"]],
+                    ["sort -o dst dst", undefined],
+                    ["sort -o f2 f1 f2 f3", ["f1"]],
+                    ["sort -o f3 f1 f2 f3", ["f1"]],
+                    ["sort f1 f2 -o f3 f3", ["f1"]],
+                    ["sort -o f1 f1 f2 f3", undefined],
+                    ["sort -o f same same", ["same"]],
+                ]],
+
+                // positionals+opts in main -> same as with only positionals in main
+                ["sort -o=$1 --files0-from=$1 $1 :! sort * $1 *", [
+                    ["sort first mid last -o first", undefined],
+                    ["sort first mid last -o first --files0-from last", undefined],
+                    ["sort first mid last -o first --files0-from first", ["first"]],
+                    ["sort first mid last -o mid", undefined],
+                    ["sort first mid last -o mid --files0-from mid", undefined],
+                    ["sort head tail tail -o tail --files0-from tail", ["tail"]],
+                    ["sort first mid mid last -o mid --files0-from mid", undefined],
+                    ["sort head tail tail -o head -o tail --files0-from head --files0-from tail", ["head", "tail"]],
+                    ["sort first mid mid last -o first -o mid --files0-from first --files0-from mid", ["first"]],
+                    ["sort same same same -o same --files0-from same", ["same"]],
+                ]],
+                ["sort -o=$1 $1 :! sort --files0-from=$1", [
+                    ["sort f -o f", ["f"]],
+                    ["sort f -o f --files0-from f", undefined],
+                    ["sort f g -o g --files0-from f", ["g"]],
+                    ["sort f g -o f -o g --files0-from f", ["g"]],
+                ]],
+                ["sort -o=$1 $1 :! sort --files0-from=$1 * $1", [
+                    ["sort f1 f2 f3 -o f1 -o f3", ["f1", "f3"]],
+                    ["sort f1 f2 f3 f4 f5 -o f1 -o f2 -o f4 --files0-from=f4 --files0-from=f5", ["f1", "f2"]],
+                    ["sort same same same -o same --files0-from same", ["same"]],
+                ]],
+
+                // only opts in main -> exclude by value
+                ["grep -f=$1 :! grep * $1", [
+                    ["grep -f f1 -f f4 pattern f1 f2 f3", ["f4"]],
+                    ["grep -f f1 -f f2 pattern f1 f2 f3", undefined],
+                    ["grep -f x pattern x y", undefined],
+                    ["grep -f same -f same pattern same", undefined],
+                ]],
+                ["grep --include=$1 :! grep -f=$1", [
+                    ["grep --include f1 --include f2 -f f1 pattern path", ["f2"]],
+                    ["grep --include f1 --include f2 pattern path", ["f1", "f2"]],
+                    ["grep --include f1 --include f2 -f f1 -f f2 pattern path", undefined],
+                    ["grep -f x pattern x y", undefined],
+                    ["grep --include same --include same -f same pattern path", undefined],
+                ]],
+                ["grep --include=$1 :! grep -f=$1 * $1", [
+                    ["grep --include f1 --include f2 -f f1 pattern f1 f2", ["f2"]],
+                    ["grep --include f1 --include f2 pattern f1 f2", ["f1", "f2"]],
+                    ["grep --include f1 --include f2 -f f1 -f f2 pattern f1 f2", undefined],
+                    ["grep --include same --include same -f same pattern other", ["same"]],
+                    ["grep --include same --include same -f same pattern same", undefined],
+                ]],
+            ])("%s", (pattern, cases) => {
+                const matcher = makeToolMatcher(pattern)
+                for (const [cmdLine, expectedMatches] of cases) {
+                    const cmd = sequenceScript(cmdLine)[0]
+                    expect(matcher(cmd), cmdLine).toStrictEqual(expectedMatches)
+                }
+            })
         })
     })
 

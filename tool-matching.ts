@@ -212,7 +212,7 @@ function matchArgs(
     args: string[], ai: number,
     pattern: string[], pi: number,
     currentCapture: string|undefined,
-    capturedIds: Set<number>
+    capturedIdxs: Set<number>
 ): boolean {
     if (pi >= pattern.length) return true
     if (ai >= args.length) return false
@@ -220,7 +220,7 @@ function matchArgs(
     if (argPattern === "*") {
         let hadMatch = false
         for (let i = ai; i < args.length; i++) {
-            if (matchArgs(args, i + 1, pattern, pi + 1, currentCapture, capturedIds)) {
+            if (matchArgs(args, i + 1, pattern, pi + 1, currentCapture, capturedIdxs)) {
                 hadMatch = true
             }
         }
@@ -233,9 +233,9 @@ function matchArgs(
             if (currentCapture !== undefined && value !== currentCapture) continue
 
             for (let j = ci; j < args.length; j++) {
-                if (matchArgs(args, j + 1, pattern, pi + 1, value, capturedIds)) {
+                if (matchArgs(args, j + 1, pattern, pi + 1, value, capturedIdxs)) {
                     if (currentCapture === undefined) {
-                        capturedIds.add(ci)
+                        capturedIdxs.add(ci)
                     }
                     hadMatch = true
                     break
@@ -245,9 +245,15 @@ function matchArgs(
         return hadMatch
     }
     if (args[ai] === argPattern) {
-        return matchArgs(args, ai + 1, pattern, pi + 1, currentCapture, capturedIds)
+        return matchArgs(args, ai + 1, pattern, pi + 1, currentCapture, capturedIdxs)
     }
     return false
+}
+
+function matchPositionals(positionals: string[], pattern: string[]): number[] | undefined {
+    const capturedIdxs = new Set<number>()
+    if (!matchArgs(positionals, 0, pattern, 0, undefined, capturedIdxs)) return undefined
+    return Array.from(capturedIdxs)
 }
 
 function matchOpts(pattern: Record<string, CommandOpt>, cmd: Record<string, CommandOpt>): string[]|undefined {
@@ -282,6 +288,41 @@ function matchOpts(pattern: Record<string, CommandOpt>, cmd: Record<string, Comm
         }
     }
     return captured
+}
+
+function matchCommand(
+    cmd: CommandWithOpts, pattern: CommandWithOpts
+): Map<string, number[]> | undefined {
+
+    if (cmd.op !== pattern.op && pattern.op !== "*") return undefined
+
+    let optsMatch = matchOpts(pattern.opts, cmd.opts)
+    if (!optsMatch) return undefined
+
+    let posMatch = matchPositionals(cmd.positionals, pattern.positionals)
+    if (!posMatch) return undefined
+
+    // Rules:
+    // - if either one didn't capture then result is the other one's captures
+    // - if both had captures then result is only values captured by both
+    // - if there were some captures then result also must have captures
+    const match = new Map<string, number[]>()
+    if (posMatch.length > 0) {
+        const onlyInCommon = optsMatch.length > 0
+        for (const idx of posMatch) {
+            const value = cmd.positionals[idx]
+            const inOpts = optsMatch.indexOf(value) >= 0
+            if (!inOpts && onlyInCommon) continue
+            match.getOrInsert(value, []).push(idx)
+        }
+        if (onlyInCommon && match.size === 0) return undefined
+
+    } else {
+        for (const value of optsMatch) {
+            match.set(value, [])
+        }
+    }
+    return match
 }
 
 export type ToolMatcher = (cmd: Command) => undefined|string[]
@@ -326,47 +367,44 @@ export function makeToolMatcher(patternStr: string, forceCapturing = false): Too
         (reference, patternCmd) => parseArgs(patternCmd, reference),
         undefined as CommandWithOpts|undefined
     )
-    const matchers: ToolMatcher[] = patternCommands.map(patternCmd => {
-        if (patternCmd.op === "*" && patternCmd.args.length === 0) return _ => []
+    // todo: if (patternCmd.op === "*" && patternCmd.args.length === 0) return _ => []
+    let patterns = patternCommands.map(pattern => parseArgs(pattern, argsReference))
+    return command => {
+        const cmd = parseArgs(command, argsReference)
+        const match = matchCommand(cmd, patterns[0])
+        if (!match) return undefined
 
-        const pattern = parseArgs(patternCmd, argsReference)
+        // Rules:
+        // - (1) if exception match with no captures -> result is "doesn't match"
+        // - (2) if main had no captures -> same as if all captures where excluded, or as if exception had no captures
+        // - otherwise -> exclude exception's captures from main
+        //   - (3) if exception captured positionals -> exclude from positionals captured by main (by pos index)
+        //   - (4) otherwise -> exclude captured value (by value)
+        //     - (5) if main didn't capture positionals -> same as if all where excluded
+        //     - note: in `cmd --opt=$1 $1` it is easier to interpret opt as just additional filter for captured positionals
+        for (const exception of patterns.values().drop(1)) {
+            const exceptionMatch = matchCommand(cmd, exception)
+            if (!exceptionMatch) continue
+            if (exceptionMatch.size === 0) return undefined  // (1)
 
-        return command => {
-            if (command.op !== pattern.op && pattern.op !== "*") return undefined
-
-            const cmd = parseArgs(command, argsReference)
-
-            let captured = matchOpts(pattern.opts, cmd.opts)
-            if (captured === undefined) return undefined
-
-            const capturedIds = new Set<number>()
-            if (!matchArgs(cmd.positionals, 0, pattern.positionals, 0, undefined, capturedIds)) return undefined
-            const capturedPositionals = capturedIds.values().map(i => cmd.positionals[i]).toArray()
-            if (capturedPositionals.length > 0) {
-                if (captured.length > 0) {
-                    captured = captured.filter(v => capturedPositionals.includes(v))
-                    if (captured.length === 0) return undefined
+            for (const [value, exceptPositions] of exceptionMatch) {
+                if (exceptPositions.length === 0) {  // (4)
+                    match.delete(value)
+                    continue
+                }
+                let positions = match.get(value)
+                if (!positions) continue
+                positions = positions.filter(i => !exceptPositions.includes(i))  // (3)
+                if (positions.length > 0) {
+                    match.set(value, positions)
                 } else {
-                    captured = capturedPositionals
+                    match.delete(value)
                 }
             }
 
-            return captured
+            if (match.size === 0) return undefined  // (2)(5)
         }
-    })
 
-    if (matchers.length === 1) return matchers[0]
-    return target => {
-        let mainMatch = matchers[0](target)
-        if (!mainMatch) return undefined
-        const capturesRequired = mainMatch.length > 0
-
-        for (const exceptionMatch of matchers.values().drop(1).map(m => m(target))) {
-            if (!exceptionMatch) continue
-            if (exceptionMatch.length === 0 || !capturesRequired) return undefined
-            mainMatch = mainMatch.filter(item => !exceptionMatch.includes(item))
-        }
-        if (capturesRequired && mainMatch.length === 0) return undefined
-        return mainMatch
+        return Array.from(match.keys())
     }
 }

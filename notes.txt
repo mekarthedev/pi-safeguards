@@ -16,8 +16,11 @@
     - either recognizee "C:/**" pattern as absolute or require users to write "/C:/**"
 - known non-path arguments: "x": { "*": "ask" } shouldn't trigger on "echo x" or "git x"
     - cd, basename/dirname, echo, printf, tar czvf
-    - git $cmd, npm $cmd
+    - git $cmd, npm $cmd, etc
+        - heuristic: ignore first positional if it's just \w+, except for known tools: `read id_rsa`, `rm -rf dir`
     - find ("find $1:!find * $1")
+- order-dependent opts in tool matching: e.g. grep --include vs --exclude
+    - `grep [.]--include= [.]--exclude=` as analogy to `dd [--]if= [--]of=`
 
 # Features
 
@@ -178,3 +181,44 @@ Solution: No strict dir check. "*:!*/" always skipped unless known to be a file
 
 For "Caveats" section:
 - */ may not check if the path is actually a directory when the path in question doesn't exist, making rules like "xxx:!*/" be skipped if xxx doesn't exist
+
+
+## Captured value identity
+
+Problem:
+- `rm $1:!rm * $1` vs "rm f f"
+- `rm $1 $1:!rm * $1` vs "rm f f" ???
+- `sort $1:!sort -o=$1 * $1` vs "sort f f -o f"
+
+`convert $1:!convert * $1` vs "convert inplace.txt inplace.txt" (hard to find a real world example)
+- must be a way to distinctly capture the read path vs the write path
+
+cmd -x=$1 :! cmd $1  - value of -x that is not a positional
+cmd -x=$1 $1 :! cmd $1  - contradicting
+cmd -x=$1 $1 :! cmd * $1 *  - both value of -x and positional that is not a middle positional
+cmd $1 :! cmd -y=$1  - any positional that is not a value of -y
+cmd $1 :! cmd -y=$1 * $1  - any positional that is not (value of -y and non-first)
+cmd -x=$1 :! cmd -x=$1 * * $1  - any value of -x that is not (value of -x and a positional starting from 3rd)
+cmd -x=$1 :! cmd -y=$1  - values of -x that are not values of -y
+cmd -x=$1 -y=$1 :! cmd -y=$1  - contradicting
+cmd -x=$1 $1 :! cmd -y=$1 $1  - values of -x that are also positionals but not values of -y that are positionals
+
+`cmd -x=$1 :! cmd -x=$1 * * $1` vs "cmd f f f -x f" or "cmd f f f -x f -x f"
+- `cmd -x=$1 $1 :! cmd -x=$1 * * $1`  - want to interpret like redundant -x= in exception
+- `cmd -x=$1 :! cmd -y=$1`
+- `cmd -x=$1 $1 :! cmd -y=$1`
+- `cmd -x=$1 $1 :! cmd -y=$1 $1`
+
+alternative:
+- `cmd $1` / `cmd *` - match first positional, not any positional
+- `cmd **` - match zero or more positionals
+- `cmd ** $1` - capture any positional
+
+main \ exception    positional         opts                positional + opts
+positional          $1 :! * $1         $1 :! -y=$1         $1 :! -y=$1 * $1
+opts                -x=$1 :! * $1      -x=$1 :! -y=$1      -x=$1 :! -y=$1 * $1
+positional + opts   -x=$1 $1 :! * $1   -x=$1 $1 :! -y=$1   -x=$1 $1 :! -y=$1 * $1
+
+if captured positionals in exception -> exclude positionals, check if empty
+otherwise -> exclude value
+-> whether value was captured by opts doesn't even matter
