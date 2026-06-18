@@ -33,6 +33,7 @@ export type Command = { op: string, args: string[], comment?: string }
 
 // Parses script into flat sequence of operations in order of execution (mostly).
 // Redirects to/from files are categorized as either ">", ">>", or "<". Heredocs are ignored.
+// Entering and exiting subshell is indicated as "(" and ")".
 export function sequenceScript(script: string): Command[] {
     function textContent(node: Node): string {
         if (node.type === "raw_string" || node.type === "string") {
@@ -47,8 +48,27 @@ export function sequenceScript(script: string): Command[] {
 
     const commands: Command[] = []
     function visit(node: Node) {
+        const isSubshell = (
+            node.type === "command_substitution"
+            || node.type === "process_substitution"
+            || node.type === "subshell"
+        )
+        const isPipeline = node.type === "pipeline"
+
+        if (isSubshell || isPipeline) {
+            commands.push({ op: "(", args: [] })
+        }
         for (const child of node.children) {
+            if (isPipeline && (child.type === "|" || child.type === "|&")) {
+                commands.push({ op: ")", args: [] }, { op: "(", args: [] })
+            }
+            const isBackground = child.nextSibling?.type === "&"
+            if (isBackground) { commands.push({ op: "(", args: [] }) }
             visit(child)
+            if (isBackground) { commands.push({ op: ")", args: [] }) }
+        }
+        if (isSubshell || isPipeline) {
+            commands.push({ op: ")", args: [] })
         }
 
         if (node.type === "command") {
@@ -77,6 +97,59 @@ export function sequenceScript(script: string): Command[] {
     visit(tree.rootNode)
 
     return commands
+}
+
+type ExecutionSimulation = {
+    parentShells: any[],
+    dirStack: string[][],
+    oldPwd: string[] | undefined,
+    cwd: string[] | undefined,
+    onNext(cmd: Command): ExecutionSimulation,
+}
+export function executionSimulation(initialCwd: string, homeDir: string|undefined): ExecutionSimulation {
+    return {
+        parentShells: [],
+        dirStack: [],
+        oldPwd: undefined,
+        cwd: [initialCwd],
+        onNext(cmd) {
+            if (this.cwd === undefined) return this
+
+            switch (cmd.op) {
+            case "cd":
+                const oldPwd = this.oldPwd
+                this.oldPwd = this.cwd
+                const arg = cmd.args.find(arg => arg !== "-L" && arg !== "-P")
+                if (arg === undefined) {
+                    this.cwd = homeDir !== undefined ? [homeDir] : undefined
+                } else if (arg === "-") {
+                    this.cwd = oldPwd
+                } else {
+                    this.cwd = [...this.cwd, arg]
+                }
+                break
+            case "pushd":
+                this.dirStack = [...this.dirStack, this.cwd]
+                this.oldPwd = this.cwd
+                this.cwd = [...this.cwd, cmd.args[0]]
+                break
+            case "popd":
+                this.oldPwd = this.cwd
+                this.cwd = this.dirStack.at(-1)
+                if (this.cwd !== undefined) {
+                    this.dirStack = this.dirStack.slice(0, -1)
+                }
+                break
+            case "(":
+                this.parentShells.push([this.dirStack, this.oldPwd, this.cwd])
+                break
+            case ")":
+                [this.dirStack, this.oldPwd, this.cwd] = this.parentShells.pop() || [["???"]]
+                break
+            } 
+            return this
+        }
+    }
 }
 
 type CommandOpt = {
@@ -149,7 +222,7 @@ function parseArgs(cmd: Command, reference?: CommandWithOpts): CommandWithOpts {
                 shortName: undefined,
                 expectsValue: undefined,
                 provided: true
-            } as CommandOpt
+            } satisfies CommandOpt
             result.opts[longName] = opt
             if (!opt.provided) {
                 opt.values = []
@@ -177,7 +250,7 @@ function parseArgs(cmd: Command, reference?: CommandWithOpts): CommandWithOpts {
                     shortName,
                     expectsValue: undefined,
                     provided: true
-                } as CommandOpt
+                } satisfies CommandOpt
                 result.opts[shortName] = opt
 
                 if (!opt.provided) {

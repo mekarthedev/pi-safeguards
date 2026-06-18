@@ -45,7 +45,11 @@ export function makeRuleset(homeDir: string, config: ConfigJson): Ruleset {
 
         const toolRules: ToolRule[] = []
         for (const [toolPattern, permission] of Object.entries(expandedToolConfig).reverse()) {
-            toolRules.push({ match: makeToolMatcher(toolPattern, true), permission, pattern: toolPattern })
+            toolRules.push({
+                match: makeToolMatcher(toolPattern === "*" ? "*:!cd:!pushd:!popd:!echo:!printf:!basename:!dirname:!realpath" : toolPattern, true),
+                permission,
+                pattern: toolPattern
+            })
         }
         rules.paths.push({ match: makePathMatcher(pathPattern)(homeDir), toolRules, pattern: pathPattern })
     }

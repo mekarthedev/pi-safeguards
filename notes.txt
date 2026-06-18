@@ -21,6 +21,11 @@
     - find ("find $1:!find * $1")
 - order-dependent opts in tool matching: e.g. grep --include vs --exclude
     - `grep [.]--include= [.]--exclude=` as analogy to `dd [--]if= [--]of=`
+- support capturing CWD-args in tool pattern: `git ... # [-C=$cwd]` or `git -C=$cwd`
+- harness session CWD vs temporary bash script CWD:
+    - "./id_rsa": "allow" vs `cd ~/.ssh && cat ./id_rsa` - should path pattern refer to ctx.cwd or to cwdSimulation.cwd ?
+- inspect alternative bash execution paths:
+    - `(cd a && cp || cd b && mv) && rm` -> [cp@a, mv@b, rm@a, rm@b]
 
 # Features
 
@@ -97,7 +102,6 @@
     - preventing home spoofing: $HOME vs actual process user home
     - preventing accidents in custom scripts. Will only check paths used in tool calls
     - recursively checking subfolders for e.g. rm -rf. Will only check explicitly mentioned paths
-    - analyzing branches of bash command execution: `(cp x && cd a || cd b) && cat y` - is it a/y or b/y?
 - caveats:
     - dir-check for non-existing paths always matches
     - home is the same home as for the user config json, not the actual system user home

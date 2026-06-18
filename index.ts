@@ -1,6 +1,6 @@
 import { loadConfig } from "./config-loading"
 import { makeRuleset, resolvePath, resolveRule } from "./ruleset"
-import { sequenceScript } from "./tool-matching"
+import { executionSimulation, sequenceScript } from "./tool-matching"
 
 import { type ExtensionAPI, getAgentDir } from "@earendil-works/pi-coding-agent"
 import path from "node:path"
@@ -22,24 +22,32 @@ export default function (pi: ExtensionAPI) {
             ...("command" in input && typeof input.command === "string" ? sequenceScript(input.command) : [])
         ]
 
-        const cwd = resolvePath({ homeDir }, ctx.cwd)
+        const ctxCwd = resolvePath({ homeDir }, ctx.cwd)
+        const cwdSimulation = executionSimulation(ctxCwd, homeDir)
         const ruledActions = []
         for (const command of actions) {
-            // todo: track cwd changes
+            const cwd = cwdSimulation.cwd !== undefined ? resolvePath({ homeDir }, ...cwdSimulation.cwd) : ctxCwd
             for (const ruleMatch of resolveRule(rules, { homeDir }, cwd, command)) {
                 ruledActions.push({ cmd: command, permission: ruleMatch.permission, ruleMatch })
             }
+            cwdSimulation.onNext(command)
         }
 
-        ctx.ui.notify(
-            "[pi-safeguards]\n" + ruledActions
-                .map(action =>
-                    `${action.cmd.op} ${action.cmd.args.join(" ")} → ${action.ruleMatch.path}\n` +
-                    `\t${action.ruleMatch.toolRule.pattern} → ${action.ruleMatch.pathRule.pattern} → ${action.permission}`
-                )
-                .join("\n"),
-            "info"
-        )
+        if (ruledActions.length > 0) {
+            ctx.ui.notify(
+                "[pi-safeguards]\n"
+                    + (cwdSimulation.cwd === undefined ? "(Failed to predict CWD for some commands. Some rules might be resolved incorrectly)\n" : "")
+                    + ruledActions
+                        .map(action =>
+                            `${action.cmd.op} ${action.cmd.args.join(" ")} → ${action.ruleMatch.path}\n` +
+                            `\t${action.ruleMatch.toolRule.pattern} → ${action.ruleMatch.pathRule.pattern} → ${action.permission}`
+                        )
+                        .join("\n"),
+                "info"
+            )
+        } else {
+            ctx.ui.notify("[pi-safeguards] No matching rules", "info")
+        }
 
         const deniedAction = ruledActions.find(action =>
             action.permission === "deny" || !ctx.hasUI && action.permission === "ask"

@@ -1,4 +1,4 @@
-import { sequenceScript, makeToolMatcher } from "./tool-matching"
+import { sequenceScript, executionSimulation, makeToolMatcher } from "./tool-matching"
 import { describe, expect, test } from "bun:test"
 
 test("sequenceScript", () => {
@@ -22,15 +22,101 @@ test("sequenceScript", () => {
 
     expect(sequenceScript("echo begin && (echo xml | xml2json.sh) && echo end")).toStrictEqual([
         { op: "echo", args: ["begin"] },
+        { op: "(", args: [] },
+        { op: "(", args: [] },
         { op: "echo", args: ["xml"] },
+        { op: ")", args: [] },
+        { op: "(", args: [] },
         { op: "xml2json.sh", args: [] },
+        { op: ")", args: [] },
+        { op: ")", args: [] },
         { op: "echo", args: ["end"] },
     ])
 
     expect(sequenceScript("cat $(cd nested) > output.txt")).toStrictEqual([
+        { op: "(", args: [] },
         { op: "cd", args: ["nested"] },
+        { op: ")", args: [] },
         { op: "cat", args: ["$(cd nested)"] },
         { op: ">", args: ["output.txt"] },
+    ])
+
+    expect(sequenceScript("(cd front && bun test); echo $(cd back && pwd)")).toStrictEqual([
+        { op: "(", args: [] },
+        { op: "cd", args: ["front"] },
+        { op: "bun", args: ["test"] },
+        { op: ")", args: [] },
+        { op: "(", args: [] },
+        { op: "cd", args: ["back"] },
+        { op: "pwd", args: [] },
+        { op: ")", args: [] },
+        { op: "echo", args: ["$(cd back && pwd)"] },
+    ])
+
+    expect(sequenceScript("sort $(cat $(echo f.txt)) $(uniq $(echo g.txt))")).toStrictEqual([
+        { op: "(", args: [] },
+        { op: "(", args: [] },
+        { op: "echo", args: ["f.txt"] },
+        { op: ")", args: [] },
+        { op: "cat", args: ["$(echo f.txt)"] },
+        { op: ")", args: [] },
+        { op: "(", args: [] },
+        { op: "(", args: [] },
+        { op: "echo", args: ["g.txt"] },
+        { op: ")", args: [] },
+        { op: "uniq", args: ["$(echo g.txt)"] },
+        { op: ")", args: [] },
+        { op: "sort", args: ["$(cat $(echo f.txt))", "$(uniq $(echo g.txt))"] },
+    ])
+
+    expect(sequenceScript("sort <(cat <(echo some)) <(uniq <(echo thing))")).toStrictEqual([
+        { op: "(", args: [] },
+        { op: "(", args: [] },
+        { op: "echo", args: ["some"] },
+        { op: ")", args: [] },
+        { op: "cat", args: ["<(echo some)"] },
+        { op: ")", args: [] },
+        { op: "(", args: [] },
+        { op: "(", args: [] },
+        { op: "echo", args: ["thing"] },
+        { op: ")", args: [] },
+        { op: "uniq", args: ["<(echo thing)"] },
+        { op: ")", args: [] },
+        { op: "sort", args: ["<(cat <(echo some))", "<(uniq <(echo thing))"] },
+    ])
+
+    expect(sequenceScript("cat `echo f.txt`")).toStrictEqual([
+        { op: "(", args: [] },
+        { op: "echo", args: ["f.txt"] },
+        { op: ")", args: [] },
+        { op: "cat", args: ["`echo f.txt`"] },
+    ])
+
+    expect(sequenceScript("echo something | xml2json.sh |& xxd")).toStrictEqual([
+        { op: "(", args: [] },
+        { op: "echo", args: ["something"] },
+        { op: ")", args: [] },
+        { op: "(", args: [] },
+        { op: "xml2json.sh", args: [] },
+        { op: ")", args: [] },
+        { op: "(", args: [] },
+        { op: "xxd", args: [] },
+        { op: ")", args: [] },
+    ])
+
+    expect(sequenceScript("echo 42 & { echo 17; } & { echo 23 & } && echo 69 &")).toStrictEqual([
+        { op: "(", args: [] },
+        { op: "echo", args: ["42"] },
+        { op: ")", args: [] },
+        { op: "(", args: [] },
+        { op: "echo", args: ["17"] },
+        { op: ")", args: [] },
+        { op: "(", args: [] },
+        { op: "(", args: [] },
+        { op: "echo", args: ["23"] },
+        { op: ")", args: [] },
+        { op: "echo", args: ["69"] },
+        { op: ")", args: [] },
     ])
 
     expect(sequenceScript("xml2json.sh < input.xml > 'some output.json' 2> errors.log")).toStrictEqual([
@@ -52,12 +138,78 @@ test("sequenceScript", () => {
         { op: "cat", args: [] },
         { op: ">", args: ["output.txt"] },
     ])
+})
 
-    expect(sequenceScript("echo something | xml2json.sh | xxd")).toStrictEqual([
-        { op: "echo", args: ["something"] },
-        { op: "xml2json.sh", args: [] },
-        { op: "xxd", args: [] },
-    ])
+describe("executionSimulation", () => {
+    test.each<[string, [string, string[]|undefined][]]>([
+        ["cd", [
+            ["cd 1", ["/", "1"]],
+            ["echo hello", ["/", "1"]],
+            ["cd 2", ["/", "1", "2"]],
+            ["cd ..", ["/", "1", "2", ".."]],
+            ["cd /root", ["/", "1", "2", "..", "/root"]],
+            ["cd", ["/home"]],
+            ["cd 3", ["/home", "3"]],
+            ["cd -L 4", ["/home", "3", "4"]],
+            ["cd -P 5", ["/home", "3", "4", "5"]],
+            ["cd -L", ["/home"]],
+        ]],
+        ["pushd/popd", [
+            ["pushd 1", ["/", "1"]],
+            ["pushd 2", ["/", "1", "2"]],
+            ["pushd 3", ["/", "1", "2", "3"]],
+            ["popd", ["/", "1", "2"]],
+            ["pushd 4", ["/", "1", "2", "4"]],
+            ["popd", ["/", "1", "2"]],
+            ["popd", ["/", "1"]],
+            ["pushd 5", ["/", "1", "5"]],
+            ["popd", ["/", "1"]],
+            ["popd", ["/"]],
+            ["popd", undefined],
+        ]],
+        ["oldpwd", [
+            ["cd 1", ["/", "1"]],
+            ["cd 2", ["/", "1", "2"]],
+            ["cd -", ["/", "1"]],
+            ["cd -", ["/", "1", "2"]],
+            ["pushd 3", ["/", "1", "2", "3"]],
+            ["pushd 4", ["/", "1", "2", "3", "4"]],
+            ["cd -", ["/", "1", "2", "3"]],
+            ["popd", ["/", "1", "2", "3"]],
+            ["popd", ["/", "1", "2"]],
+            ["cd -", ["/", "1", "2", "3"]],
+            ["cd", ["/home"]],
+            ["cd -", ["/", "1", "2", "3"]],
+        ]],
+        ["subshell", [
+            ["pushd 1", ["/", "1"]],
+            ["pushd 2", ["/", "1", "2"]],
+            ["cd 3", ["/", "1", "2", "3"]],
+            ["(", ["/", "1", "2", "3"]],
+            ["cd 4", ["/", "1", "2", "3", "4"]],
+            [")", ["/", "1", "2", "3"]],
+            ["(", ["/", "1", "2", "3"]],
+            ["cd -", ["/", "1", "2"]],
+            ["cd 5", ["/", "1", "2", "5"]],
+            [")", ["/", "1", "2", "3"]],
+            ["cd -", ["/", "1", "2"]],
+            ["cd 3", ["/", "1", "2", "3"]],
+            ["(", ["/", "1", "2", "3"]],
+            ["pushd 6", ["/", "1", "2", "3", "6"]],
+            [")", ["/", "1", "2", "3"]],
+            ["(", ["/", "1", "2", "3"]],
+            ["popd", ["/", "1"]],
+            [")", ["/", "1", "2", "3"]],
+            ["popd", ["/", "1"]],
+        ]],
+    ])("%s", (_, cases) => {
+        const sim = executionSimulation("/", "/home")
+        expect(sim.cwd).toStrictEqual(["/"])
+        for (const [i, [cmdLine, expectedCwd]] of cases.entries()) {
+            sim.onNext(["(", ")"].includes(cmdLine) ? { op: cmdLine, args: [] } : sequenceScript(cmdLine)[0])
+            expect(sim.cwd, `:${i}: ${cmdLine}`).toStrictEqual(expectedCwd)
+        }
+    })
 })
 
 describe("makeToolMatcher", () => {
