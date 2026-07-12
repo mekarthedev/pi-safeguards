@@ -36,10 +36,11 @@ export type Command = { op: string, args: string[], comment?: string }
 // Entering and exiting subshell is indicated as "(" and ")".
 export function sequenceScript(script: string): Command[] {
     function textContent(node: Node): string {
-        if (node.type === "raw_string" || node.type === "string") {
-            return node.text.slice(1, node.text.length-1)
-        }
-        return node.text
+        const isRaw = node.type === "raw_string"
+        const text = isRaw || node.type === "string"
+            ? node.text.slice(1, node.text.length-1)
+            : node.text
+        return isRaw ? text : text.replace(/\\(.)/g, '$1')
     }
 
     const tree = parser.parse(script)
@@ -152,8 +153,8 @@ export function executionSimulation(initialCwd: string, homeDir: string|undefine
     }
 }
 
-type CommandOpt = {
-    values: string[],
+type CommandOpt<Value = string> = {
+    values: Value[],
     expectsValue: boolean|undefined,
     provided: boolean,
 } & (
@@ -165,13 +166,16 @@ type CommandOpt = {
         shortName: string,
     }
 )
-type CommandWithOpts = { op: string, opts: Record<string, CommandOpt>, positionals: string[] }
+type CommandWithOpts<Value = string> = { op: Value, opts: Record<string, CommandOpt<Value>>, positionals: Value[] }
 const longOptionRegex = /^(?<name>--[^=]+)(=(?<value>.*))?$/
 // possible hints: [-n=], [--name=], [-n|--name], [-n|--name=], [--name|-n], [--name|-n=]
 const optionHintRegex = /\[((?<short>-[^-])(\|(?<long>--[^=\]]+))?|(?<long>--[^=\]]+)(\|(?<short>-[^-=]))?)(?<hasValue>=)?\]/g
-function parseArgs(cmd: Command, reference?: CommandWithOpts): CommandWithOpts {
-    const result: CommandWithOpts = {
-        op: cmd.op,
+function parseArgs<V = string>(cmd: Command, reference?: CommandWithOpts, parseValue?: (raw: string) => V): CommandWithOpts<V> {
+    if (!parseValue) {
+        parseValue = raw => raw as unknown as V
+    }
+    const result: CommandWithOpts<V> = {
+        op: parseValue(cmd.op),
         opts: {},
         positionals: [],
     }
@@ -209,7 +213,7 @@ function parseArgs(cmd: Command, reference?: CommandWithOpts): CommandWithOpts {
     for (let argIndex = 0; argIndex < cmd.args.length; argIndex++) {
         const arg = cmd.args[argIndex]
         if (arg === "--") {
-            result.positionals.push(...cmd.args.slice(argIndex + 1))
+            result.positionals.push(...cmd.args.slice(argIndex + 1).map(a => parseValue(a)))
             break
         }
 
@@ -235,7 +239,7 @@ function parseArgs(cmd: Command, reference?: CommandWithOpts): CommandWithOpts {
                 argIndex += 1
             }
             if (value !== undefined) {
-                opt.values.push(value)
+                opt.values.push(parseValue(value))
                 opt.expectsValue = true
             }
             continue
@@ -268,7 +272,7 @@ function parseArgs(cmd: Command, reference?: CommandWithOpts): CommandWithOpts {
                     }
                 }
                 if (value !== undefined) {
-                    opt.values.push(value)
+                    opt.values.push(parseValue(value))
                     opt.expectsValue = true
                     break
                 }
@@ -276,164 +280,349 @@ function parseArgs(cmd: Command, reference?: CommandWithOpts): CommandWithOpts {
             continue
         }
 
-        result.positionals.push(arg)
+        result.positionals.push(parseValue(arg))
     }
     return result
 }
 
-function matchArgs(
+type ValueMatcherContext = {
+    totalCGroups: number
+    cgroupIdxs: Record<string, number>  // capture group name to capture group index
+    backrefs: Record<string, string>  // backref group name to capture group name
+    newValueMatcher(pattern: string): ValueMatcher
+}
+type ValueMatcher = { pattern: string|RegExp, context: ValueMatcherContext }
+
+const captureGroupRegex = /\(([^)]*)\)/
+function newMatchingContext(): ValueMatcherContext {
+    const context: ValueMatcherContext = {
+        totalCGroups: 0,
+        cgroupIdxs: {},
+        backrefs: { "br": "c1" },
+        newValueMatcher(pattern: string): ValueMatcher {
+            if (pattern === "**") return { pattern, context }
+            if (!pattern.includes("*") && !pattern.includes("$1")) return { pattern, context }
+    
+            let hadBackref = false
+            function glob2regex(part: string) {
+                return part.split(/(\*|\$1)/).map(p => {
+                    switch (p) {
+                        case "*": return ".*"
+                        case "$1": {  // #todo: support $2, $3, etc
+                            if (hadBackref) return "\\k<br>"
+                            hadBackref = true
+                            return "(?<br>.*)"
+                        }
+                        default: return RegExp.escape(p)
+                    }
+                }).join("")
+            }
+            const parts = pattern.split(captureGroupRegex).map((part, i) =>
+                i % 2 === 1 ? `(?<${nextCGroupName()}>` + glob2regex(part) + ")" : glob2regex(part)
+            )
+            return { pattern: new RegExp("^" + parts.join("") + "$"), context }
+        }
+    }
+    function nextCGroupName(): string {
+        const name = "c" + (++context.totalCGroups)
+        context.cgroupIdxs[name] = context.totalCGroups
+        return name
+    }
+    return context
+}
+
+type CaptureSet = {
+    captures?: Map<string, Set<string>>
+    backrefs?: Map<string, Set<string>>
+    rawBackrefs?: Map<string, Set<string>>
+}
+
+function addCaptures(captureSet: CaptureSet, newCaptures: Record<string, string>, context: ValueMatcherContext) {
+    for (const [group, value] of Object.entries(newCaptures)) {
+        let map: Map<string, Set<string>>
+        if (context.backrefs[group]) {
+            if (!captureSet.rawBackrefs) { captureSet.rawBackrefs = new Map() }
+            map = captureSet.rawBackrefs
+        } else {
+            if (!captureSet.captures) { captureSet.captures = new Map() }
+            map = captureSet.captures
+        }
+        map.getOrInsertComputed(group, () => new Set()).add(value)
+    }
+}
+
+function reconcileBackrefs(captureSet: CaptureSet) {
+    if (!captureSet.rawBackrefs) return
+    if (!captureSet.backrefs) {
+        captureSet.backrefs = captureSet.rawBackrefs
+    } else {
+        for (const [brGroup, values] of captureSet.rawBackrefs) {
+            captureSet.backrefs.set(brGroup, values)
+        }
+    }
+    captureSet.rawBackrefs = undefined
+}
+
+// During value matching only backrefs are filtered out.
+// Captured values also need to be filtered out.
+// All backrefs must reference something.
+// I.e. something must have been captured by referenced group. And no group will become empty.
+function cleanupReferencedGroups(captureSet: CaptureSet, context: ValueMatcherContext) {
+    if (!captureSet.backrefs) return
+    if (!captureSet.captures) throw "Bug: there are backreferences while no capture groups"
+    for (const [backrefGroup, refs] of captureSet.backrefs) {
+        const captureGroup = context.backrefs[backrefGroup]
+        const captures = captureSet.captures.get(captureGroup)
+        if (!captures) throw `Bug: ${backrefGroup} backreferences group that didn't capture`
+        const inCommon = captures.intersection(refs)
+        if (inCommon.size === 0) throw `Bug: ${backrefGroup} backreferences a value that wasn't captured`
+        captureSet.captures.set(captureGroup, inCommon)
+    }
+}
+
+function matchValue(
+    value: string,
+    matcher: ValueMatcher,
+    captureCandidates: Record<string, string>,
+    captureSet: CaptureSet
+): undefined | [Record<string, string>|undefined, Record<string, string>] {
+    if (typeof matcher.pattern === "string") return matcher.pattern === value ? [undefined, captureCandidates] : undefined
+
+    const match = matcher.pattern.exec(value)
+    if (!match) return undefined
+    if (match.length === 1) return [undefined, captureCandidates]
+
+    if (match.groups) {
+        for (const [group, refValue] of Object.entries(match.groups)) {
+            const cgroup = matcher.context.backrefs[group]
+            if (!cgroup) continue
+
+            const newCapture = match.groups[cgroup]
+            if (newCapture !== undefined) {
+                if (refValue !== newCapture) return undefined
+                else continue
+            }
+            const candidateBackref = captureCandidates[group]
+            if (candidateBackref !== undefined) {
+                if (refValue !== candidateBackref) return undefined
+                else continue
+            }
+            const candidateCapture = captureCandidates[cgroup]
+            if (candidateCapture !== undefined) {
+                if (refValue !== candidateCapture) return undefined
+                else continue
+            }
+            const otherBackrefs = captureSet.backrefs?.get(group)
+            if (otherBackrefs !== undefined) {
+                if (!otherBackrefs.has(refValue)) return undefined
+                else continue
+            }
+            const otherCaptures = captureSet.captures?.get(cgroup)
+            if (otherCaptures !== undefined) {
+                if (!otherCaptures.has(refValue)) return undefined
+                else continue
+            }
+            // Backreferences must reference something captured.
+            return undefined
+        }
+    }
+
+    return [match.groups, { ...captureCandidates, ...match.groups }]
+}
+
+function matchOrdered(
     args: string[], ai: number,
-    pattern: string[], pi: number,
-    currentCapture: string|undefined,
-    capturedIdxs: Set<number>
+    pattern: ValueMatcher[], pi: number,
+    captureCandidates: Record<string, string>,
+    captureSet: CaptureSet
 ): boolean {
     if (pi >= pattern.length) return true
-    if (ai >= args.length) return false
-    const argPattern = pattern[pi]
-    if (argPattern === "*") {
+    const matcher = pattern[pi]
+
+    if (ai >= args.length) {
+        if (matcher.pattern === ";" && pi === pattern.length - 1) {
+            return true
+        } else return false
+    }
+
+    if (matcher.pattern === "**") {
         let hadMatch = false
         for (let i = ai; i < args.length; i++) {
-            if (matchArgs(args, i + 1, pattern, pi + 1, currentCapture, capturedIdxs)) {
+            if (matchOrdered(args, i, pattern, pi + 1, captureCandidates, captureSet)) {
                 hadMatch = true
             }
         }
         return hadMatch
     }
-    if (argPattern === "$1") {
-        let hadMatch = false
-        for (let ci = ai; ci < args.length; ci++) {
-            let value = args[ci]
-            if (currentCapture !== undefined && value !== currentCapture) continue
 
-            for (let j = ci; j < args.length; j++) {
-                if (matchArgs(args, j + 1, pattern, pi + 1, value, capturedIdxs)) {
-                    if (currentCapture === undefined) {
-                        capturedIdxs.add(ci)
-                    }
-                    hadMatch = true
-                    break
-                }
+    const valueMatch = matchValue(args[ai], matcher, captureCandidates, captureSet)
+    if (!valueMatch) return false
+    const [newCaptures, newCandidates] = valueMatch
+
+    if (!matchOrdered(
+        args, ai + 1,
+        pattern, pi + 1,
+        newCandidates,
+        captureSet
+    )) return false
+
+    if (newCaptures) {
+        addCaptures(captureSet, newCaptures, matcher.context)
+    }
+    return true
+}
+
+function matchPositionals(
+    positionals: string[], pattern: ValueMatcher[], captureSet: CaptureSet
+): boolean {
+    if (!matchOrdered(positionals, 0, pattern, 0, {}, captureSet)) return false
+    reconcileBackrefs(captureSet)
+    return true
+}
+
+function matchUnordered(values: string[], patterns: ValueMatcher[], captureSet: CaptureSet): boolean {
+    if (values.length < patterns.length) return false
+    const usedValues = new Array(values.length).fill(false)
+
+    function matchRest(pi: number, captureCandidates: Record<string, string>): boolean {
+        if (pi >= patterns.length) return true
+
+        const matcher = patterns[pi]
+
+        // #todo: Kuhn's algo?
+        let hadMatch = false
+        for (let vi = 0; vi < values.length; vi++) {
+            if (usedValues[vi]) continue
+            const value = values[vi]
+
+            const valueMatch = matchValue(value, matcher, captureCandidates, captureSet)
+            if (!valueMatch) continue
+            const [newCaptures, newCandidates] = valueMatch
+            usedValues[vi] = true
+
+            if (!matchRest(pi + 1, newCandidates)) {
+                usedValues[vi] = false
+                continue
+            }
+            usedValues[vi] = false
+            hadMatch = true
+
+            if (newCaptures) {
+                addCaptures(captureSet, newCaptures, matcher.context)
             }
         }
         return hadMatch
     }
-    if (args[ai] === argPattern) {
-        return matchArgs(args, ai + 1, pattern, pi + 1, currentCapture, capturedIdxs)
-    }
-    return false
+
+    if (!matchRest(0, {})) return false
+    reconcileBackrefs(captureSet)
+    return true
 }
 
-function matchPositionals(positionals: string[], pattern: string[]): number[] | undefined {
-    const capturedIdxs = new Set<number>()
-    if (!matchArgs(positionals, 0, pattern, 0, undefined, capturedIdxs)) return undefined
-    return Array.from(capturedIdxs)
-}
-
-function matchOpts(pattern: Record<string, CommandOpt>, cmd: Record<string, CommandOpt>): string[]|undefined {
-    let captured: string[] = []
+function matchOpts(
+    cmd: Record<string, CommandOpt>,
+    pattern: Record<string, CommandOpt<ValueMatcher>>,
+    captureSet: CaptureSet
+): boolean {
     for (const patternOpt of Object.values(pattern)) {
         if (!patternOpt.provided) continue
 
         const cmdOpt = cmd[patternOpt.longName || patternOpt.shortName || ""]
-        if (!cmdOpt || !cmdOpt.provided) return undefined
+        if (!cmdOpt || !cmdOpt.provided) return false
 
-        if (cmdOpt.values.length < patternOpt.values.length) return undefined
-
-        let hasCapture = false
-        const consumableValues: (string|undefined)[] = [...cmdOpt.values]
-        for (const p of patternOpt.values) {
-            if (p === "*") continue
-            if (p === "$1") {
-                hasCapture = true
-            } else {
-                const i = consumableValues.indexOf(p)
-                if (i < 0) return undefined
-                consumableValues[i] = undefined
-            }
-        }
-        if (hasCapture) {
-            if (captured.length === 0) {
-                captured = consumableValues.filter(v => v !== undefined)
-            } else {
-                captured = captured.filter(v => consumableValues.includes(v))
-            }
-            if (captured.length === 0) return undefined
-        }
+        const match = matchUnordered(cmdOpt.values, patternOpt.values, captureSet)
+        if (!match) return false
     }
-    return captured
+    return true
 }
 
-function matchCommand(
-    cmd: CommandWithOpts, pattern: CommandWithOpts
-): Map<string, number[]> | undefined {
+function matchArgs(
+    cmd: CommandWithOpts,
+    pattern: CommandWithOpts<ValueMatcher>,
+    context: ValueMatcherContext
+): Set<string> | undefined {
 
-    if (cmd.op !== pattern.op && pattern.op !== "*") return undefined
+    const captureSet: CaptureSet = {}
+    if (!matchOpts(cmd.opts, pattern.opts, captureSet)) return undefined
+    if (!matchPositionals(cmd.positionals, pattern.positionals, captureSet)) return undefined
 
-    let optsMatch = matchOpts(pattern.opts, cmd.opts)
-    if (!optsMatch) return undefined
+    cleanupReferencedGroups(captureSet, context)
 
-    let posMatch = matchPositionals(cmd.positionals, pattern.positionals)
-    if (!posMatch) return undefined
+    const result = new Set<string>()
+    if (!captureSet.captures) return result
 
-    // Rules:
-    // - if either one didn't capture then result is the other one's captures
-    // - if both had captures then result is only values captured by both
-    // - if there were some captures then result also must have captures
-    const match = new Map<string, number[]>()
-    if (posMatch.length > 0) {
-        const onlyInCommon = optsMatch.length > 0
-        for (const idx of posMatch) {
-            const value = cmd.positionals[idx]
-            const inOpts = optsMatch.indexOf(value) >= 0
-            if (!inOpts && onlyInCommon) continue
-            match.getOrInsert(value, []).push(idx)
-        }
-        if (onlyInCommon && match.size === 0) return undefined
-
-    } else {
-        for (const value of optsMatch) {
-            match.set(value, [])
-        }
+    const ordered = new Array<Set<string>>(captureSet.captures.size)
+    for (const [group, captures] of captureSet.captures) {
+        const index = context.cgroupIdxs[group]
+        ordered[index - 1] = captures
     }
-    return match
+    for (const captures of ordered) {
+        for (const c of captures) result.add(c)
+    }
+    return result
 }
 
 export type ToolMatcher = (cmd: Command) => undefined|string[]
 
 /*
+Roadmap:
 - separate opts from positionals:
     - parsing target command args depends on how pattern was parsed
-    - everything starting with "-" is option
+    - everything starting with "-" is option (except "--")
     - target command arg: "-k/--key value" -> did pattern contain "-k=" or "--key="?
         - no -> parse arg as option "-k/--key" and positional "value"
         - yes -> parse as option with value
-    - support opts definition hints in pattern: "sort [-o|--output=]"
+    - support opts definition hints in pattern: "sort # [-o|--output=]"
+    - everything after "--" is positional
 - for positional args order matters, for opts -> doesn't
-    - unordered positionals: "dd [--]of=$1", "tar [-]cvf"
+    - unordered positionals: "dd [--]of=*", "tar [-]cvf"
 - wildcard
     - "*" on its own = exactly one positional arg
     - "something*" = zero or more characters (--something*, --something=*, --some*=*)
-- wildcarded positionals ("*" or "some*") allow zero or more positionals before and after them
-- non-wildcarded positionals always together: "git status" doesn't match "git branch status"
+    - "**" - special positional, matches 0 or more positionals
+    - ";" - like "$" in regex
+- capturing
+    - "dd of=(*)" or "dd of=(/secrets/*)"
+    - union all captures if multiple capture groups in single pattern
+    - backreference with "$1"
+        - between opts
+        - between positionals
+        - between opts and positionals
+        - within single arg
 - ":!"-exceptions have two modes of operation:
-    - without $1 in main pattern -> `main() && !exceptions.some()`
-    - with $1 -> subtract exception $1-captures from main $1-captures, or fail on exception without $1
+    - without capturing in main pattern -> `main() && !exceptions.some()`
+    - with capturing -> subtract exception's captures from main captures, or fail on exception without captures
 */
 export function makeToolMatcher(patternStr: string, forceCapturing = false): ToolMatcher {
     const patternCommands = []
     for (const [i, subStr] of patternStr.split(":!").entries()) {
-        let cmd: Command|undefined = sequenceScript(subStr)[0]
+        let cmd: Command|undefined = sequenceScript(subStr.replace(/([();])/g, '\\$1'))[0]
         if (!cmd) {
             if (i > 0) continue
             cmd = { op: "*", args: [] }
         }
+        if (cmd.args.length === 0) {
+            if (cmd.op.length > 1 && cmd.op.endsWith(";")) {
+                cmd.op = cmd.op.slice(0, cmd.op.length - 1)
+                cmd.args.push(";")
+            }
+        } else {
+            const lastArg = cmd.args[cmd.args.length - 1]
+            if (lastArg.length > 1 && lastArg.endsWith(";")) {
+                cmd.args[cmd.args.length - 1] = lastArg.slice(0, lastArg.length - 1)
+                cmd.args.push(";")
+            }
+        }
         patternCommands.push(cmd)
     }
-    if (forceCapturing && !patternCommands[0].args.some(arg => arg.includes("$1"))) {
-        if (!patternCommands[0].args.includes("--")) {
-            patternCommands[0].args.push("--")
+    if (forceCapturing) {
+        const mainArgs = patternCommands[0].args
+        if (mainArgs.at(-1) !== ";" && !mainArgs.some(arg => arg.match(captureGroupRegex))) {
+            if (!mainArgs.includes("--")) {
+                mainArgs.push("--")
+            }
+            mainArgs.push("**", "(*)")
         }
-        patternCommands[0].args.push("$1")
     }
 
     let argsReference = patternCommands.reduce(  // assuming all subpatterns match the same op
@@ -441,43 +630,34 @@ export function makeToolMatcher(patternStr: string, forceCapturing = false): Too
         undefined as CommandWithOpts|undefined
     )
     // todo: if (patternCmd.op === "*" && patternCmd.args.length === 0) return _ => []
-    let patterns = patternCommands.map(pattern => parseArgs(pattern, argsReference))
+    let patterns = patternCommands.map(pattern => {
+        const context = newMatchingContext()
+        return [parseArgs(pattern, argsReference, context.newValueMatcher), context] as const
+    })
+    const [main, mainContext] = patterns[0]
     return command => {
+        if (!matchValue(command.op, main.op, {}, {})) return undefined
+
+        // #todo: somehow parse command args only once
         const cmd = parseArgs(command, argsReference)
-        const match = matchCommand(cmd, patterns[0])
+        const match = matchArgs(cmd, main, mainContext)
         if (!match) return undefined
 
         // Rules:
-        // - (1) if exception match with no captures -> result is "doesn't match"
-        // - (2) if main had no captures -> same as if all captures where excluded, or as if exception had no captures
+        // - if exception match with no captures -> result is "doesn't match"
+        // - if main had no captures -> same as if all captures where excluded, or as if exception had no captures
         // - otherwise -> exclude exception's captures from main
-        //   - (3) if exception captured positionals -> exclude from positionals captured by main (by pos index)
-        //   - (4) otherwise -> exclude captured value (by value)
-        //     - (5) if main didn't capture positionals -> same as if all where excluded
-        //     - note: in `cmd --opt=$1 $1` it is easier to interpret opt as just additional filter for captured positionals
-        for (const exception of patterns.values().drop(1)) {
-            const exceptionMatch = matchCommand(cmd, exception)
+        for (const [exception, exceptionContext] of patterns.values().drop(1)) {
+            if (!matchValue(cmd.op, exception.op, {}, {})) continue
+
+            const exceptionMatch = matchArgs(cmd, exception, exceptionContext)
             if (!exceptionMatch) continue
-            if (exceptionMatch.size === 0) return undefined  // (1)
+            if (exceptionMatch.size === 0) return undefined
 
-            for (const [value, exceptPositions] of exceptionMatch) {
-                if (exceptPositions.length === 0) {  // (4)
-                    match.delete(value)
-                    continue
-                }
-                let positions = match.get(value)
-                if (!positions) continue
-                positions = positions.filter(i => !exceptPositions.includes(i))  // (3)
-                if (positions.length > 0) {
-                    match.set(value, positions)
-                } else {
-                    match.delete(value)
-                }
-            }
-
-            if (match.size === 0) return undefined  // (2)(5)
+            for (const e of exceptionMatch) { match.delete(e) }
+            if (match.size === 0) return undefined
         }
 
-        return Array.from(match.keys())
+        return Array.from(match)
     }
 }

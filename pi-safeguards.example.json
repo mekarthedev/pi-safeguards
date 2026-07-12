@@ -25,8 +25,8 @@
 
         "*.log": "noedit",
         "*.db": "noedit",
-        "*.sqlite": { "edit:!bash sqlite": "deny" },
-        "*.sqlite3": { "edit:!bash sqlite": "deny" }
+        "*.sqlite": { "edit :! sqlite": "deny" },
+        "*.sqlite3": { "edit :! sqlite": "deny" }
     },
 
     "bash": {
@@ -36,8 +36,7 @@
         "chmod": "ask!",
         "ssh*": "ask!",
 
-        "rm -rf": "ask",
-        "rm --recursive": "ask",
+        "rm -rf # [-r|--recursive]": "ask",
 
         "git:!git status:!git diff:!git log": "ask",
         "npm": { "install": "ask", "add": "ask", "i": "ask" },

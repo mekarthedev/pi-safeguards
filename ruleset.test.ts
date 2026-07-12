@@ -84,15 +84,15 @@ test("multiple paths in a single tool call", () => {
 test("multiple tool rules for single tool call", () => {
     const config: ConfigJson = {
         paths: {
-            "node_modules/**": { "cp * $1": "deny", "cp $1 *": "allow" },
+            "node_modules/**": { "cp * (*)": "deny", "cp (*)": "allow" },
         }
     }
     const resolveTest = makeRulesetTest("/users/rick", config)("/proj")
     expect(resolveTest(
         "cp", "node_modules/pkg", "node_modules/pkgcopy"
     )).toStrictEqual([
-        ["/proj/node_modules/pkg", "cp $1 *", "node_modules/**", "allow"],
-        ["/proj/node_modules/pkgcopy", "cp * $1", "node_modules/**", "deny"],
+        ["/proj/node_modules/pkg", "cp (*)", "node_modules/**", "allow"],
+        ["/proj/node_modules/pkgcopy", "cp * (*)", "node_modules/**", "deny"],
     ])
 })
 
@@ -100,17 +100,36 @@ test("multiple path rules for single tool call", () => {
     const config: ConfigJson = {
         paths: {
             "*": "ask",
-            "node_modules/**": { "cp * $1:!cp $1 *": "deny" },
-            "src/**": { "cp $1 *": "allow" },
+            "node_modules/**": { "cp ** (*);": "deny" },
+            "src/**": { "cp ** (*) *": "allow" },
         }
     }
     const resolveTest = makeRulesetTest("/users/rick", config)("/proj")
     expect(resolveTest(
         "cp", "src/index.ts", "node_modules/pkg/index.ts"
     )).toStrictEqual([
-        ["/proj/src/index.ts", "cp $1 *", "src/**", "allow"],
-        ["/proj/node_modules/pkg/index.ts", "cp * $1:!cp $1 *", "node_modules/**", "deny"],
+        ["/proj/src/index.ts", "cp ** (*) *", "src/**", "allow"],
+        ["/proj/node_modules/pkg/index.ts", "cp ** (*);", "node_modules/**", "deny"],
     ])
+})
+
+test("captured empty strings are ignored", () => {
+    const config: ConfigJson = {
+        paths: {
+            "*": "deny",
+            "~/.ssh/**": { "cat": "ask" },
+        }
+    }
+    const resolveTest = makeRulesetTest("/users/rick", config)("/proj")
+    expect(resolveTest(
+        "cat", "", "~/.ssh/github", "", "~/.ssh/aws", ""
+    )).toStrictEqual([
+        ["/users/rick/.ssh/github", "cat", "~/.ssh/**", "ask"],
+        ["/users/rick/.ssh/aws", "cat", "~/.ssh/**", "ask"],
+    ])
+    expect(resolveTest(
+        "cat", ""
+    )).toStrictEqual([])
 })
 
 test("tool patterns always capture", () => {
@@ -118,22 +137,15 @@ test("tool patterns always capture", () => {
         paths: {
             "*": {
                 "*": "allow",
-                "rm:!rm --dry-run": "deny",
-                "mv *:!mv $1 *:!mv * trash": "ask",
+                "mv :! mv ** (build/*) * :! mv ** trash;": "ask",
             },
         }
     }
     const resolveTest = makeRulesetTest("/users/rick", config)("/proj")
-    expect(resolveTest("rm", "file")).toStrictEqual([
-        ["/proj/file", "rm:!rm --dry-run", "*", "deny"],
-    ])
-    expect(resolveTest("rm", "--dry-run", "file")).toStrictEqual([
-        ["/proj/file", "*", "*", "allow"],
-    ])
-
-    expect(resolveTest("mv", "src", "dst")).toStrictEqual([
-        ["/proj/dst", "mv *:!mv $1 *:!mv * trash", "*", "ask"],
-        ["/proj/src", "*", "*", "allow"],
+    expect(resolveTest("mv", "src", "build/artefact.zip", "server")).toStrictEqual([
+        ["/proj/src", "mv :! mv ** (build/*) * :! mv ** trash;", "*", "ask"],
+        ["/proj/server", "mv :! mv ** (build/*) * :! mv ** trash;", "*", "ask"],
+        ["/proj/build/artefact.zip", "*", "*", "allow"],
     ])
     expect(resolveTest("mv", "src", "trash")).toStrictEqual([
         ["/proj/src", "*", "*", "allow"],

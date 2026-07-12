@@ -75,6 +75,7 @@ export function resolveRule(
             if (!capturedPaths) continue
 
             for (const pathRaw of capturedPaths) {
+                if (pathRaw === "") continue
                 const targetPath = resolvePath(pathOpts, cwd, pathRaw)
                 if (ruledPaths.has(targetPath)) continue
 

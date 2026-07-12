@@ -13,7 +13,7 @@
     - "~" for $HOME vs "~~" for effective system user home
 - {edit: "deny", read: "allow"} vs "sed -i" - which permission wins?
 - absolute paths on windows:
-    - either recognizee "C:/**" pattern as absolute or require users to write "/C:/**"
+    - either recognize "C:/**" pattern as absolute or require users to write "/C:/**"
 - known non-path arguments: "x": { "*": "ask" } shouldn't trigger on "echo x" or "git x"
     - cd, basename/dirname, echo, printf, tar czvf
     - git $cmd, npm $cmd, etc
@@ -26,8 +26,12 @@
     - "./id_rsa": "allow" vs `cd ~/.ssh && cat ./id_rsa` - should path pattern refer to ctx.cwd or to cwdSimulation.cwd ?
 - inspect alternative bash execution paths:
     - `(cd a && cp || cd b && mv) && rm` -> [cp@a, mv@b, rm@a, rm@b]
+- concurrent call of multiple tools - check if rule resolutions displayed correctly for each
+- variadic num of paths in a single arg: `java -cp lib/a.jar:lib/b.jar:lib/c.jar`
+- hot-reload config
+- report malformed tool patterns: "sort (*) -o=$1" is effectively "sort -o=$1 (*)", which never matches
 
-# Features
+# Pitch
 
 - rule: "path-pattern:!except-path-pattern": { "tool-pattern:!except-tool-pattern": "permission[!]" }
     - "read" also affects:
@@ -109,7 +113,6 @@
 
 # History
 
-
 ## Simplified pattern matching
 
 Pattern: | Old behavior:      | New behavior:      | New equivalent for old behavior:
@@ -187,7 +190,7 @@ For "Caveats" section:
 - */ may not check if the path is actually a directory when the path in question doesn't exist, making rules like "xxx:!*/" be skipped if xxx doesn't exist
 
 
-## Captured value identity
+## [Outdated] Captured value identity
 
 Problem:
 - `rm $1:!rm * $1` vs "rm f f"
@@ -213,11 +216,6 @@ cmd -x=$1 $1 :! cmd -y=$1 $1  - values of -x that are also positionals but not v
 - `cmd -x=$1 $1 :! cmd -y=$1`
 - `cmd -x=$1 $1 :! cmd -y=$1 $1`
 
-alternative:
-- `cmd $1` / `cmd *` - match first positional, not any positional
-- `cmd **` - match zero or more positionals
-- `cmd ** $1` - capture any positional
-
 main \ exception    positional         opts                positional + opts
 positional          $1 :! * $1         $1 :! -y=$1         $1 :! -y=$1 * $1
 opts                -x=$1 :! * $1      -x=$1 :! -y=$1      -x=$1 :! -y=$1 * $1
@@ -226,3 +224,109 @@ positional + opts   -x=$1 $1 :! * $1   -x=$1 $1 :! -y=$1   -x=$1 $1 :! -y=$1 * $
 if captured positionals in exception -> exclude positionals, check if empty
 otherwise -> exclude value
 -> whether value was captured by opts doesn't even matter
+
+
+## Position matching for wildcarded vs literal positionals
+
+Problem:
+- `dd of=$1` - should it require fixed position like literals or match any position like wildcard?
+- `git * $1` - hard to describe "ignore sub-command"
+
+alternative:
+- `cmd $1` / `cmd *` - match first positional, not any positional, just like for literals
+    - `cmd $1*` / `cmd **`
+- `cmd **` - match zero or more positionals
+- `cmd ** $1` - capture any positional
+- `cmd $1;` - same as `$` in regex
+
+Should `cmd ** $1` be equivalent to `cmd ** $1 **` ?
+- "git branch": "deny" must match `git branch x y`
+
+- `dd ** of=$1`
+- `git * ** $1`
+- `cp ** $1 ;` - only destination
+- `cp ** $1 *` - any source
+
+
+## Identity of positional substring capture
+
+Problem:
+"rm $1 :! rm $1 sub/$1" vs `rm x sub/x` -> should exclude "sub/x"?
+- exclude substrings by value -> keep "sub/x" -> somewhat unintuitive
+- no way to describe "all positionals except those that match pattern x"
+  - compare to "except those that are non-first/non-last"
+
+Solution:
+- any presence of $1 marks positional for exclusion by index
+- captured substring (not full value) is used for exclusion by value
+- only compare substring to substring or full value, never full to full
+- support "$1*" or "*$1" to allow using full value as substring
+
+main capture         exception capture                         decision
+["sub/x" @ n, none] - ["sub/x" @ n, none] -> n == n              -> exclude (by index, as before)
+["sub/x" @ n, none] - ["sub/x" @ m, none] -> n != m              -> keep (by index, as before)
+["of=x" @ n, "x"]   - ["if=x" @ m, "x"]   -> "x" == "x"          -> exclude (by value)
+["sub/x" @ n, none] - ["sub/x" @ n, "x"]  -> n == n              -> exclude (by index, similar to before)
+["sub/x" @ n, "x"]  - ["sub/x" @ n, none] -> n == n              -> exclude (by index, similar to before)
+    - `rm sub/$1 :! rm * $1 *` vs "rm a sub/x c"
+["sub/x" @ n, "x"]  - ["x" @ m, none]     -> n != m, no substr   -> keep (by value)
+    - `rm sub/$1 :! rm * $1 *` vs "rm sub/x x sub/y sub/z"  -> ["sub/x", "sub/z"]
+["sub/x" @ n, "x"]  - ["x" @ m, "x"]     -> "x" == "x"           -> exclude (by value)
+    - `rm sub/$1 :! rm * $1* *` vs "rm sub/x x sub/y sub/z" -> ["sub/z"]
+["x" @ n, none]     - ["sub/x" @ m, "x"]  -> full "x" == sub "x" -> exclude (by value)
+
+- same idx -> same full value
+- different idx -> might be same full value
+
+(m - main, e - exception, i - index, f - full value, s - substring, none - no substring)
+substr \ indexes    |  im != ie, fm != fe        |  im != ie, fm == fe          |  im == ie (fm == fe)
+---------------------------------------------------------------------------------------------------------
+- none, none        |  "$1:!* $1",`x y`          |  "$1:!* $1",`x x`            |  "$1:!* $1",`z y`
+                    |  x vs y -> keep            |  x@0 vs x@1 -> keep          |  y@1 vs y@1 -> exclude
+
+- sm == fe, none    |  "s/$1:!* $1",`s/x x`      |  "$1*:!* $1",`x x`           |  "$1*:!* $1",`z y`
+                    |  x@0 vs x@1 -> keep (1)    |  x@0 vs x@1 -> keep          |  y@1 vs y@1 -> exclude
+
+- sm != fe, none    |  "s/$1:!* $1",`s/x y`      |  "s/$1:!* $1",`s/x s/x`      |  "s/$1:!* $1",`z s/y`
+                    |  x@0 vs y@1 -> keep        |  s/x@0 vs s/x@1 -> keep      |  y@1 vs s/y@1 -> exclude
+
+- none, fm == se    |  "$1:!* s/$1",`x s/x`      |  "$1:!* $1*",`x x`           |  "$1:!* $1*",`z y`
+                    |  x@0 vs x@1 -> exclude (0) |  x@0 vs x@1 -> exclude       |  y@1 vs y@1 -> exclude
+
+- none, fm != se    |  "$1:!* s/$1",`x s/y`      |  "$1:!* s/$1",`s/x s/x`      |  "$1:!* s/$1",`z s/y`
+                    |  x@0 vs y@1 -> keep        |  s/x@0 vs x@1 -> keep        |  s/y@1 vs y@1 -> exclude (2)
+
+- sm == se          |  "a=$1:!b=$1",`a=x b=x`    |  "a=$1:!* a=$1",`a=x a=x`    |  "a=$1:!* a=$1",`z a=x`
+                    |  x@0 vs x@1 -> exclude (3) |  x@0 vs x@1 -> exclude (4)   |  x@1 vs x@1 -> exclude
+
+- sm != se          |  "a=$1:!b=$1",`a=x b=y`    |  "a=$1:!* a=/$1",`a=/b a=/b` |  "a=$1:!a=/$1",`z a=/b`
+                    |  x@0 vs y@1 -> keep        |  /b@0 vs b@1 -> keep         |  /b@1 vs b@1 -> exclude (2)
+
+(0) - an issue: "except equal to this substring" and "except matching this pattern" are combined into one feature
+(1) - feature: exclude complex patterns by position index
+(2) - feature: way to say "except positionals that match pattern x"
+(3) - "dd of=$1 :! dd if=$1"
+(4) - see (3), use (1) instead: "a=$1 :! * $1"
+
+Why exclusion even exist?
+- alternative pattern syntax can handle cases like "only n-th positional"
+- "sort $1 :! sort -o=$1": "deny" vs `sort a b c -o=b` - deny reading without overwriting
+
+More problems:
+- Separate "equal to $1 in of=/tmp/$1" from "match of=/tmp/$*"
+- How can be applied to opts?
+- "docker -v ${/secrets/*}:*" - capture substring that matches pattern, including pattern part
+
+Solution:
+- "equal to $1 in of=/tmp/$1" -> "dd of=/tmp/(*)"
+- "match of=/tmp/$*" -> "dd of=(/tmp/*)"
+- "echo $1 :! echo ultra-$1" vs `echo ultra-fox jumps over fox`
+    -> "echo (*) :! echo (ultra-*)" for ["jumps", "over", "fox"]
+    -> "echo (*) :! echo ultra-(*)" for ["ultra-fox", "jumps", "over"]
+    -> "echo (*) :! echo ultra-(*) :! echo (ultra-*)" for ["jumps", "over"]
+- "docker -v (/secrets/*):*"
+- reserve "$1" only for backreferences
+    - "sort (*) --output=$1"
+
+"echo (*) :! echo ultra-(*)" vs "echo (*) :! echo ultra-$1"
+- "echo (*) :! echo (ultra-*)" is a thing even with allowed cross-exception backrefs.
