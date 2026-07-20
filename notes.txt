@@ -22,6 +22,7 @@
 - order-dependent opts in tool matching: e.g. grep --include vs --exclude
     - `grep [.]--include= [.]--exclude=` as analogy to `dd [--]if= [--]of=`
 - support capturing CWD-args in tool pattern: `git ... # [-C=$cwd]` or `git -C=$cwd`
+- rules per CWD: e.g. deny launching subagents outside CWD
 - harness session CWD vs temporary bash script CWD:
     - "./id_rsa": "allow" vs `cd ~/.ssh && cat ./id_rsa` - should path pattern refer to ctx.cwd or to cwdSimulation.cwd ?
 - inspect alternative bash execution paths:
@@ -30,6 +31,7 @@
 - variadic num of paths in a single arg: `java -cp lib/a.jar:lib/b.jar:lib/c.jar`
 - hot-reload config
 - report malformed tool patterns: "sort (*) -o=$1" is effectively "sort -o=$1 (*)", which never matches
+- command for ad-hoc in-session rules: `/safeguard deny grep * *:!~/*/**`
 
 # Pitch
 

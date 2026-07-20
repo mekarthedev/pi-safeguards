@@ -439,21 +439,22 @@ function matchOrdered(
     if (pi >= pattern.length) return true
     const matcher = pattern[pi]
 
-    if (ai >= args.length) {
-        if (matcher.pattern === ";" && pi === pattern.length - 1) {
-            return true
-        } else return false
+    if (matcher.pattern === ";" && pi === pattern.length - 1) {
+        return ai >= args.length
     }
 
     if (matcher.pattern === "**") {
         let hadMatch = false
-        for (let i = ai; i < args.length; i++) {
+        let i = ai
+        do {
             if (matchOrdered(args, i, pattern, pi + 1, captureCandidates, captureSet)) {
                 hadMatch = true
             }
-        }
+        } while (i++ < args.length)
         return hadMatch
     }
+
+    if (ai >= args.length) return false
 
     const valueMatch = matchValue(args[ai], matcher, captureCandidates, captureSet)
     if (!valueMatch) return false
