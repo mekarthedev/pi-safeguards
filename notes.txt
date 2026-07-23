@@ -1,5 +1,6 @@
 # TODO
 
+- {edit: "deny", read: "allow"} vs "sed -i" - which permission wins?
 - what "ask" should be replaced with in non-interactive mode?
 - protect specific line numbers, especially with temporary safeguards from the skill
     - "edit:L17-40": "ask", "edit:!L45-100": "deny"
@@ -11,7 +12,13 @@
     - `sudo -u foo pi` - who's config should be used?
     - protect other users with "~/../**:!~/**": "deny!" ?
     - "~" for $HOME vs "~~" for effective system user home
-- {edit: "deny", read: "allow"} vs "sed -i" - which permission wins?
+- support capturing CWD-args in tool pattern: `git ... # [-C=$cwd]` or `git -C=$cwd`
+- rules per CWD: e.g. deny launching subagents outside CWD
+- harness session CWD vs temporary bash script CWD:
+    - "./id_rsa": "allow" vs `cd ~/.ssh && cat ./id_rsa` - should path pattern refer to ctx.cwd or to cwdSimulation.cwd ?
+- inspect alternative bash execution paths:
+    - `(cd a && cp || cd b && mv) && rm` -> [cp@a, mv@b, rm@a, rm@b]
+- don't capture "-" in e.g. `cat -`
 - absolute paths on windows:
     - either recognize "C:/**" pattern as absolute or require users to write "/C:/**"
 - known non-path arguments: "x": { "*": "ask" } shouldn't trigger on "echo x" or "git x"
@@ -19,30 +26,33 @@
     - git $cmd, npm $cmd, etc
         - heuristic: ignore first positional if it's just \w+, except for known tools: `read id_rsa`, `rm -rf dir`
     - find ("find $1:!find * $1")
+- definitions section in config:
+    - definitions: { "sort": { format: "sort [-o|--output=]" }, "git": { format: "git [-C=$CWD]" } }
+    - allow custom implicit rules
 - order-dependent opts in tool matching: e.g. grep --include vs --exclude
     - `grep [.]--include= [.]--exclude=` as analogy to `dd [--]if= [--]of=`
-- support capturing CWD-args in tool pattern: `git ... # [-C=$cwd]` or `git -C=$cwd`
-- rules per CWD: e.g. deny launching subagents outside CWD
-- harness session CWD vs temporary bash script CWD:
-    - "./id_rsa": "allow" vs `cd ~/.ssh && cat ./id_rsa` - should path pattern refer to ctx.cwd or to cwdSimulation.cwd ?
-- inspect alternative bash execution paths:
-    - `(cd a && cp || cd b && mv) && rm` -> [cp@a, mv@b, rm@a, rm@b]
-- concurrent call of multiple tools - check if rule resolutions displayed correctly for each
 - variadic num of paths in a single arg: `java -cp lib/a.jar:lib/b.jar:lib/c.jar`
+- concurrent call of multiple tools - check if rule resolutions displayed correctly for each
 - hot-reload config
 - report malformed tool patterns: "sort (*) -o=$1" is effectively "sort -o=$1 (*)", which never matches
 - command for ad-hoc in-session rules: `/safeguard deny grep * *:!~/*/**`
+- special "readonly" mode:
+    - like `pi --tools read,grep,find,ls` but also allow bash with whitelist of commands
+    - whitelist `node --permission node --allow-fs-read=*`
+    - whitelist various ways to run tests
 
 # Pitch
 
 - rule: "path-pattern:!except-path-pattern": { "tool-pattern:!except-tool-pattern": "permission[!]" }
-    - "read" also affects:
-        - cp(from), mv(from), <, grep, rg, cat, tail, head, dd(if=), sed, cut, uniq(input), sort(input)
-    - "edit" also affects:
-        - "write" (only itself)
-        - cp(to), mv(to), mkdir, >, >>, dd(of=), sed(-i), uniq(output), sort(--output), truncate, tee, touch
-    - "write" is same as "edit", but also affects:
-        - rm, mv(from)
+    - implicit rules:
+        - "read" also affects:
+            - cp(from), mv(from), <, grep, rg, cat, tail, head, dd(if=), sed, cut, uniq(input), sort(input)
+        - "edit" also affects:
+            - "write" (only itself)
+            - cp(to), mv(to), mkdir, >, >>, dd(of=), sed(-i), uniq(output), sort(--output), truncate, tee, touch
+        - ephemeral "delete" tool, affects:
+            - rm, mv(from)
+        - "write" combines "edit" and "delete"
     - shorthand syntax:
         - "path": "permission" = "path": { "*": "permission" }
         - "nowrite" = "readonly" = { "write": "deny" }
@@ -53,13 +63,13 @@
         - "noread" = "writeonly" = { "read": "deny" }
     - exceptions: ".ssh/**:!*.pub": "deny" - meaning this rule should be skipped for "*.pub"
     - rules are checked from bottom to top, first rule (per targeted path) with matching path and tool wins
-    - "permission!" makes rule both high priority and strict, e.g. "pi-safeguards.json": "readonly!"
-        - high priority = the rule is checked before any non-high priority rule
-        - strict = matching doesn't stop: all strict rules are checked -> most strict wins
+    - "permission!" makes rule "high-sec" = high priority + strict, e.g. "pi-safeguards.json": "readonly!"
+        - high priority = the rule overrides any matching non-high priority rule
+        - strict = matching doesn't stop with first match: all strict rules are checked -> most strict wins
         - to prevent unintetional overriding by e.g. ".." or "*.json"
         - full syntax: "a": { "b": "allow!", "c": "deny!" }
     - if no rule for the tool, then go to next path pattern
-    - if no matchin rule -> default pi behavior = "allow", or some other extension
+    - if no matching rule -> default pi behavior = allow, or some other extension
     - "edit": "ask" - when asking, present the user with the proposed diff
         - an option to open diff in external tool
 - path pattern:
@@ -98,9 +108,9 @@
     - /safeguards:lint for additional checks:
         - check "xxx/**" is after "xxx/"
 - "safegards help steering" philosophy
-    - guaranteeing strict access controll, i.e. sandboxing, is a non-goal
+    - guaranteeing strict access controll, aka sandboxing, is a non-goal
         - llm accidentally bypassing safeguards is not the end of the world as long as it's reminded of the rules in time
-    - explain to the agent what is it allowed to do
+    - explain to llm what is it allowed to do
     - a skill to allow llm make temporary safeguards for itself.
         - e.g. when prompting like "safeguard implementation files from changes, only write tests"
 - non-goals:
@@ -108,6 +118,7 @@
     - preventing home spoofing: $HOME vs actual process user home
     - preventing accidents in custom scripts. Will only check paths used in tool calls
     - recursively checking subfolders for e.g. rm -rf. Will only check explicitly mentioned paths
+    - supporting options for all possible bash commands. Only best effort for most common cases.
 - caveats:
     - dir-check for non-existing paths always matches
     - home is the same home as for the user config json, not the actual system user home

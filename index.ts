@@ -38,10 +38,15 @@ export default function (pi: ExtensionAPI) {
                 "[pi-safeguards]\n"
                     + (cwdSimulation.cwd === undefined ? "(Failed to predict CWD for some commands. Some rules might be resolved incorrectly)\n" : "")
                     + ruledActions
-                        .map(action =>
-                            `${action.cmd.op} ${action.cmd.args.join(" ")} → ${action.ruleMatch.path}\n` +
-                            `\t${action.ruleMatch.toolRule.pattern} → ${action.ruleMatch.pathRule.pattern} → ${action.permission}`
-                        )
+                        .map(action => {
+                            const origin = action.ruleMatch.toolRule.origin
+                            const toolPattern = action.ruleMatch.toolRule.pattern
+                            const pathPattern = action.ruleMatch.pathRule.pattern
+                            const originReference = origin ? origin + " → " : ""
+                            const ruleDescription = `${toolPattern} → ${pathPattern} → ${action.permission}`
+                            const ruleSubject = `${action.cmd.op} ${action.cmd.args.join(" ")} → ${action.ruleMatch.path}`
+                            return `${ruleSubject}\n\t${originReference}${ruleDescription}`
+                        })
                         .join("\n"),
                 "info"
             )

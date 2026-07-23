@@ -29,6 +29,8 @@ function printTree(tree: any) {
 }
 */
 
+// MARK: sequencing
+
 export type Command = { op: string, args: string[], comment?: string }
 
 // Parses script into flat sequence of operations in order of execution (mostly).
@@ -152,6 +154,8 @@ export function executionSimulation(initialCwd: string, homeDir: string|undefine
         }
     }
 }
+
+// MARK: parsing
 
 type CommandOpt<Value = string> = {
     values: Value[],
@@ -284,6 +288,8 @@ function parseArgs<V = string>(cmd: Command, reference?: CommandWithOpts, parseV
     }
     return result
 }
+
+// MARK: matching
 
 type ValueMatcherContext = {
     totalCGroups: number
@@ -563,6 +569,8 @@ function matchArgs(
     return result
 }
 
+// MARK: make matcher
+
 export type ToolMatcher = (cmd: Command) => undefined|string[]
 
 /*
@@ -597,7 +605,7 @@ Roadmap:
 export function makeToolMatcher(patternStr: string, forceCapturing = false): ToolMatcher {
     const patternCommands = []
     for (const [i, subStr] of patternStr.split(":!").entries()) {
-        let cmd: Command|undefined = sequenceScript(subStr.replace(/([();])/g, '\\$1'))[0]
+        let cmd: Command|undefined = sequenceScript(subStr.replace(/([();<>])/g, '\\$1'))[0]
         if (!cmd) {
             if (i > 0) continue
             cmd = { op: "*", args: [] }

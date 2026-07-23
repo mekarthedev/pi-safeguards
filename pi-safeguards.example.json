@@ -1,9 +1,11 @@
 {
     "paths": {
         "*": "askwrite",
-        "./**": "allow",
-        "./": "askwrite",
+        "*:!~/*/**": { "grep": "ask", "find": "ask" },
+        "./*/**": "allow",
+
         "pi-safeguards.json": "readonly!",
+        "~/.pi/agent/auth.json": "deny!",
 
         "*.env": "deny",
         "*.env.*:!*.env.example": "deny",
@@ -37,6 +39,7 @@
         "ssh*": "ask!",
 
         "rm -rf # [-r|--recursive]": "ask",
+        "rmdir -p # [-p|--parents]": "deny",
 
         "git:!git status:!git diff:!git log": "ask",
         "npm": { "install": "ask", "add": "ask", "i": "ask" },

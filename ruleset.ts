@@ -17,18 +17,76 @@ const permissionShorthands = {
     "askedit": { "edit": "ask" },
 } as const
 
+const anyToolExceptIgnored = "*:!cd:!pushd:!popd:!echo:!printf:!basename:!dirname:!realpath"
+
+const implicitlyAffectedTools: Record<string, string[]> = (function() {
+    const waysToRead = [
+        "grep *", "rg *", "cat", "<",
+        // #todo: less, has tons of opts
+        "dd ** if=(*)",
+        "mv ** (*) *", "cp ** (*) *", "rsync ** (*) *",
+        "od # [-t|--format=] [-j|--skip-bytes=] [-N|--read-bytes=] [-w|--width=] [-A|--address-radix=]",
+        "hexdump # [-e|--format=] [-s|--skip=] [-n|--length=]",
+        // #todo: xxd accepts single-dash long opts
+        "xxd (*) # [-o=] [-l=]",
+        "sed -e=* # [-e|--expression=]", "sed * :! sed -e=* # [-e|--expression=]",
+        "awk -f=* # [-F=]", "awk * ** (*) :! awk -f=* # [-F=]",
+        "uniq (*)", "sort # [-o|--output=]", "cut", "head", "tail",
+        "join ** (*) # [-t=] [-a=] [-v=] [-o=] [-j=] [-1=] [-2=]",
+        "curl -d=@(*) # [-d|--data=]", "curl --data-ascii=@(*)", "curl --data-binary=@(*)", "curl --data-urlencode=*@(*)",
+        "curl --json=@(*)",
+        // #todo: better pattern syntax to support cases like `-F name=@path;type=...`
+        "curl -F=*=@(*) # [-F|--form=]", "curl -F=*=<(*) # [-F|--form=]",
+        "curl -H=@(*) # [-H|--header=]",
+        // Because ln creates a new path that can be used to read the original.
+        "ln ** (*) * :! ln -t=* # [-t|--target-directory=]", "ln -t=* ** (*) # [-t|--target-directory=]",
+    ]
+    // Either deletion or creation of a path must be categorized as edit,
+    // otherwise edit could be circumvented by delete+create.
+    // Literally every bash command doesn't distinguish creation from modification.
+    const waysToEdit = [
+        ">", ">>",
+        // #todo: if cp/mv/rsync src/dst is dir then need to check (dir/(filename $1))
+        "cp ** * (*);", "mv ** * (*);", "rsync ** * (*);",
+        "dd ** of=(*)", "truncate", "tee",
+        "sed -i -e=* # [-e|--expression=]", "sed -i * :! sed -e=* # [-e|--expression=]",
+        "uniq * (*)", "sort -o=(*) # [-o|--output=]",
+        "curl -o=(*) # [-o|--output=]", "curl --stderr=(*)",
+        "curl -D=(*) # [-D|--dump-header=]", "curl --etag-save=(*)",
+        "ln ** * (*); :! ln -t=* # [-t|--target-directory=]", "ln -t=(*) # [-t|--target-directory=]",
+        "mkdir", "touch",
+        // #todo: chmod accepts positional with leading dash (the mode)
+        "chmod # [--reference=]", "chown # [--reference=] [--from=]",
+    ]
+    const waysToDelete = [
+        "rm", "rmdir",
+        "mv ** (*) *",
+        "unlink",
+        "find (*) -delete",  // #todo: find accepts single-dash long opts
+        "rsync --delete (*)",
+        "shred",
+        "srm",
+    ]
+    return {
+        "read": waysToRead,
+        "edit": [ "write", ...waysToEdit ],
+        "delete": waysToDelete,  // ephemeral
+        "write": [ "edit", ...waysToEdit, ...waysToDelete ],
+    }
+})()
+
 export type Permission = "deny" | "allow" | "ask"
 type PermissionShorthandBase = keyof typeof permissionShorthands
-type PermissionShorthand = PermissionShorthandBase | `${PermissionShorthandBase}!`
-export type ConfigJson = { paths: Record<string, PermissionShorthand | Record<string, Permission> > }
+type PermissionShorthand = PermissionShorthandBase | PermissionConfig | `${PermissionShorthandBase}!`
+export type ConfigJson = { paths: Record<string, PermissionShorthand | Record<string, PermissionConfig> > }
 
-type ToolRule = { match: ToolMatcher, permission: Permission, pattern: string, }
+type ToolRule = { match: ToolMatcher, permission: Permission, pattern: string, origin?: string }
 type PathRule = { match: ReturnType<PathMatcher>, toolRules: ToolRule[], pattern: string, }
 export type Ruleset = Record<string, PathRule[]>
 
 export function makeRuleset(homeDir: string, config: ConfigJson): Ruleset {
     const rules: Ruleset = { paths: [] }
-    // todo: numeric-like string keys are interpreted as numeric -> some rules might be out of order
+    // #todo: numeric-like string keys are interpreted as numeric -> some rules might be out of order
     for (const [pathPattern, toolConfig] of Object.entries(config.paths).reverse()) {
 
         let expandedToolConfig: Record<string, Permission>
@@ -46,10 +104,22 @@ export function makeRuleset(homeDir: string, config: ConfigJson): Ruleset {
         const toolRules: ToolRule[] = []
         for (const [toolPattern, permission] of Object.entries(expandedToolConfig).reverse()) {
             toolRules.push({
-                match: makeToolMatcher(toolPattern === "*" ? "*:!cd:!pushd:!popd:!echo:!printf:!basename:!dirname:!realpath" : toolPattern, true),
+                match: makeToolMatcher(toolPattern === "*" ? anyToolExceptIgnored : toolPattern, true),
                 permission,
                 pattern: toolPattern
             })
+            const implicits = implicitlyAffectedTools[toolPattern]
+            if (implicits) {
+                // #todo: deduplicate redundant rules when both write and edit/delete are present
+                for (const implicitPattern of implicits) {
+                    toolRules.push({
+                        match: makeToolMatcher(implicitPattern, true),
+                        permission,
+                        pattern: implicitPattern,
+                        origin: toolPattern,
+                    })
+                }
+            }
         }
         rules.paths.push({ match: makePathMatcher(pathPattern)(homeDir), toolRules, pattern: pathPattern })
     }
