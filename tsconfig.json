@@ -4,13 +4,17 @@
     "lib": ["esnext"],
     "types": ["bun"],
 
+    "erasableSyntaxOnly": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
     "strict": true,
-    "noImplicitAny": true,
-    "noImplicitReturns": true,
-    "noImplicitOverride": true,
-    "noUnusedLocals": true,
-    "noFallthroughCasesInSwitch": true,
+    "allowUnusedLabels": false,
     "allowUnreachableCode": false,
-    "allowUnusedLabels": false
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "noPropertyAccessFromIndexSignature": false,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
   }
 }

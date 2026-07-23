@@ -1,8 +1,8 @@
 import { loadConfig } from "./config-loading"
 import { makeRuleset, resolvePath, resolveRule } from "./ruleset"
-import { executionSimulation, sequenceScript } from "./tool-matching"
+import { executionSimulation, sequenceScript, type Command } from "./tool-matching"
 
-import { type ExtensionAPI, getAgentDir } from "@earendil-works/pi-coding-agent"
+import { getAgentDir, isToolCallEventType, type ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import path from "node:path"
 import os from "node:os"
 
@@ -16,11 +16,18 @@ export default function (pi: ExtensionAPI) {
     const rules = makeRuleset(homeDir, config)
 
 	pi.on("tool_call", async (event, ctx) => {
-        const input = event.input
-        const actions = [
-            ...("path" in input && typeof input.path === "string" ? [{ op: event.toolName, args: [input.path] }] : []),
-            ...("command" in input && typeof input.command === "string" ? sequenceScript(input.command) : [])
-        ]
+        const actions: Command[] = []
+        if (isToolCallEventType("bash", event)) {
+            actions.push(...sequenceScript(event.input.command))
+
+        } else if (isToolCallEventType("grep", event)) {
+            // align with bash `grep` args layout
+            actions.push({ op: event.toolName, args: [event.input.pattern, event.input.path || ctx.cwd] })
+
+        } else if ("path" in event.input && typeof event.input.path === "string") {
+            // note: bash `find` accepts pattern after path, unlike grep
+            actions.push({ op: event.toolName, args: [event.input.path] })
+        }
 
         const ctxCwd = resolvePath({ homeDir }, ctx.cwd)
         const cwdSimulation = executionSimulation(ctxCwd, homeDir)
