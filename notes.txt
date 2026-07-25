@@ -32,9 +32,10 @@
 - order-dependent opts in tool matching: e.g. grep --include vs --exclude
     - `grep [.]--include= [.]--exclude=` as analogy to `dd [--]if= [--]of=`
 - variadic num of paths in a single arg: `java -cp lib/a.jar:lib/b.jar:lib/c.jar`
+- allow exceptions affect implicit rules: "edit :! touch" - because "touch": "allow" is bad practice
 - concurrent call of multiple tools - check if rule resolutions displayed correctly for each
 - hot-reload config
-- report malformed tool patterns: "sort (*) -o=$1" is effectively "sort -o=$1 (*)", which never matches
+- validate config on load
 - command for ad-hoc in-session rules: `/safeguard deny grep * *:!~/*/**`
 - special "readonly" mode:
     - like `pi --tools read,grep,find,ls` but also allow bash with whitelist of commands
@@ -97,16 +98,17 @@
     - track cwd in case of `cd some && cd where && bash`
 - (quasi-)security / safeguards for safegards:
     - config file is "readonly!" by default
-    - next rule overrides previous rule, even if previous is stricter
     - when "bash" and "paths" both match -> stricter wins
     - project vs user config:
         - by default: stricter rule wins (e.g. running with untrusted 3rd party config)
         - /safeguards:trust command to allow project config to override parent/user config, normal priority only
-- config lint:
-    - "*" pattern, if present, must be the first one in the list, and must not be of high priority
-    - "sed *:!sort *" - mismatching command names -> exception does nothing
-    - /safeguards:lint for additional checks:
-        - check "xxx/**" is after "xxx/"
+    - if config file becomes invalid, use previously loaded valid config
+        - if no previous config, default to "*": "deny!"
+- /safeguards:lint command:
+    - warn: "*" pattern isn't the first one in the list, or is high-sec
+    - warn: "sed *:!sort *" - mismatching command names -> exception does nothing
+    - warn: pattern like "xxx/**" checked before "xxx/"
+    - report malformed tool patterns: "sort (*) -o=$1" is effectively "sort -o=$1 (*)", which never matches
 - "safegards help steering" philosophy
     - guaranteeing strict access controll, aka sandboxing, is a non-goal
         - llm accidentally bypassing safeguards is not the end of the world as long as it's reminded of the rules in time

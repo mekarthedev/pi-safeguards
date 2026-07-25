@@ -5,6 +5,13 @@ import path from "node:path"
 import url from "node:url"
 import fs from "node:fs"
 
+const permissions = {
+    "allow": 0,
+    "ask": 1,
+    "deny": 2,
+} as const
+export type Permission = keyof typeof permissions
+
 const permissionShorthands = {
     "deny": { "*": "deny" },
     "allow": { "*": "allow" },
@@ -16,6 +23,7 @@ const permissionShorthands = {
     "noedit": { "edit": "deny" },
     "askedit": { "edit": "ask" },
 } as const
+type Shorthand = keyof typeof permissionShorthands
 
 const anyToolExceptIgnored = "*:!cd:!pushd:!popd:!echo:!printf:!basename:!dirname:!realpath"
 
@@ -75,37 +83,58 @@ const implicitlyAffectedTools: Record<string, string[]> = (function() {
     }
 })()
 
-export type Permission = "deny" | "allow" | "ask"
-type PermissionShorthandBase = keyof typeof permissionShorthands
-type PermissionShorthand = PermissionShorthandBase | PermissionConfig | `${PermissionShorthandBase}!`
-export type ConfigJson = { paths: Record<string, PermissionShorthand | Record<string, PermissionConfig> > }
+type PermissionConfig = Permission | `${Permission}!`
+type ShorthandConfig = Shorthand | PermissionConfig | `${Shorthand}!`
+export type ConfigJson = { paths: Record<string, ShorthandConfig | Record<string, PermissionConfig> > }
 
-type ToolRule = { match: ToolMatcher, permission: Permission, pattern: string, origin?: string }
-type PathRule = { match: ReturnType<PathMatcher>, toolRules: ToolRule[], pattern: string, }
+type ToolRule = {
+    match: ToolMatcher,
+    permission: Permission,
+    highSec: boolean,
+    pattern: string,
+    origin?: string
+}
+type PathRule = {
+    match: ReturnType<PathMatcher>,
+    toolRules: ToolRule[],
+    pattern: string,
+}
 export type Ruleset = Record<string, PathRule[]>
+
+function parsePermission<Config extends string, Value = Config extends `${infer T}!` ? T : Config>(
+    config: Config
+): { value: Value, highSec: boolean } {
+    const highSec = config.endsWith("!")
+    const value = (highSec ? config.slice(0, config.length - 1) : config) as Value
+    return { value, highSec }
+}
 
 export function makeRuleset(homeDir: string, config: ConfigJson): Ruleset {
     const rules: Ruleset = { paths: [] }
     // #todo: numeric-like string keys are interpreted as numeric -> some rules might be out of order
     for (const [pathPattern, toolConfig] of Object.entries(config.paths).reverse()) {
 
-        let expandedToolConfig: Record<string, Permission>
+        let expandedToolConfig: Record<string, PermissionConfig>
+        let isHighSecShorthand = false
         if (typeof toolConfig === "string" ) {
-            const highPriority = toolConfig.endsWith("!")
-            const shorthand = highPriority ? toolConfig.slice(0, toolConfig.length - 1) : toolConfig
+            const { value: shorthand, highSec } = parsePermission(toolConfig)
+            isHighSecShorthand = highSec
             if (!(shorthand in permissionShorthands)) {
                 throw new Error(`Unknown shorthand "${shorthand}" for pattern "${pathPattern}"`)
             }
-            expandedToolConfig = permissionShorthands[shorthand as PermissionShorthandBase]
+            expandedToolConfig = permissionShorthands[shorthand as Shorthand]
         } else {
             expandedToolConfig = toolConfig
         }
 
         const toolRules: ToolRule[] = []
-        for (const [toolPattern, permission] of Object.entries(expandedToolConfig).reverse()) {
+        for (const [toolPattern, permissionConfig] of Object.entries(expandedToolConfig).reverse()) {
+            const { value: permission, highSec: isHighSecToolRule } = parsePermission(permissionConfig)
+            const highSec = isHighSecShorthand || isHighSecToolRule
             toolRules.push({
                 match: makeToolMatcher(toolPattern === "*" ? anyToolExceptIgnored : toolPattern, true),
                 permission,
+                highSec,
                 pattern: toolPattern
             })
             const implicits = implicitlyAffectedTools[toolPattern]
@@ -115,6 +144,7 @@ export function makeRuleset(homeDir: string, config: ConfigJson): Ruleset {
                     toolRules.push({
                         match: makeToolMatcher(implicitPattern, true),
                         permission,
+                        highSec,
                         pattern: implicitPattern,
                         origin: toolPattern,
                     })
@@ -133,12 +163,13 @@ type RuleMatch = {
     toolRule: ToolRule,
     pathRule: PathRule,
     permission: Permission,
+    highSec: boolean,
 }
 export function resolveRule(
     rules: Ruleset, pathOpts: PathResolutionOpts, cwd: string, command: Command
 ): RuleMatch[] {
-    const ruledPaths = new Set<string>()
-    const matches = []
+    type MatchCandidate = { toolRule: ToolRule, pathRule: PathRule }
+    const ruledPaths = new Map<string, { isDir: RuleMatch["isDir"], normal?: MatchCandidate, highSec?: MatchCandidate }>()
     for (const pathRule of rules.paths) {
         for (const toolRule of pathRule.toolRules) {
             const capturedPaths = toolRule.match(command)
@@ -146,23 +177,48 @@ export function resolveRule(
 
             for (const pathRaw of capturedPaths) {
                 if (pathRaw === "") continue
-                const targetPath = resolvePath(pathOpts, cwd, pathRaw)
-                if (ruledPaths.has(targetPath)) continue
 
-                const stat = fs.statSync(targetPath, { throwIfNoEntry: false })
-                const targetIsDir = stat && stat.isDirectory()
-                if (pathRule.match(cwd)(targetPath, targetIsDir)) {
-                    ruledPaths.add(targetPath)
-                    matches.push({
-                        path: targetPath,
-                        isDir: targetIsDir,
-                        toolRule,
-                        pathRule,
-                        permission: toolRule.permission
-                    })
+                const targetPath = resolvePath(pathOpts, cwd, pathRaw)
+                let ruleCandidates = ruledPaths.get(targetPath)
+                if (!toolRule.highSec && (ruleCandidates?.normal || ruleCandidates?.highSec)) continue
+                if (!ruleCandidates) {
+                    const stat = fs.statSync(targetPath, { throwIfNoEntry: false })
+                    ruleCandidates = {
+                        // #todo: not covered by unit tests
+                        isDir: stat && stat.isDirectory(),
+                        normal: undefined,
+                        highSec: undefined,
+                    }
+                    ruledPaths.set(targetPath, ruleCandidates)
+                }
+
+                if (pathRule.match(cwd)(targetPath, ruleCandidates.isDir)) {
+                    if (toolRule.highSec) {
+                        const existing = ruleCandidates.highSec?.toolRule.permission
+                        if (!existing || permissions[existing] < permissions[toolRule.permission]) {
+                            ruleCandidates.highSec = { toolRule, pathRule }
+                        }
+                    } else if (!ruleCandidates.normal) {
+                        ruleCandidates.normal = { toolRule, pathRule }
+                    }
                 }
             }
         }
+    }
+
+    const matches = []
+    for (const [targetPath, candidates] of ruledPaths) {
+        const rule = candidates.highSec ?? candidates.normal
+        if (!rule) continue
+
+        matches.push({
+            path: targetPath,
+            isDir: candidates.isDir,
+            toolRule: rule.toolRule,
+            pathRule: rule.pathRule,
+            permission: rule.toolRule.permission,
+            highSec: rule.toolRule.highSec,
+        })
     }
     return matches
 }

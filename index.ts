@@ -50,7 +50,8 @@ export default function (pi: ExtensionAPI) {
                             const toolPattern = action.ruleMatch.toolRule.pattern
                             const pathPattern = action.ruleMatch.pathRule.pattern
                             const originReference = origin ? origin + " → " : ""
-                            const ruleDescription = `${toolPattern} → ${pathPattern} → ${action.permission}`
+                            const highSec = action.ruleMatch.highSec ? "!" : ""
+                            const ruleDescription = `${toolPattern} → ${pathPattern} → ${action.permission}${highSec}`
                             const ruleSubject = `${action.cmd.op} ${action.cmd.args.join(" ")} → ${action.ruleMatch.path}`
                             return `${ruleSubject}\n\t${originReference}${ruleDescription}`
                         })
@@ -77,7 +78,9 @@ export default function (pi: ExtensionAPI) {
                 reason: `[pi-safeguards] Command \`${cmdLine}\` shouldn't have been used with path \`${deniedAction.ruleMatch.path}\``
             }
         }
-        const approvalRequests = ruledActions.filter(action => action.permission === "ask")
+        const approvalRequests = ruledActions
+            .filter(action => action.permission === "ask")
+            .toSorted((lhs, rhs) => (lhs.ruleMatch.highSec ? -1 : 1) - (rhs.ruleMatch.highSec ? -1 : 1))
         for (const [i, action] of approvalRequests.entries()) {
             const totalRequests = approvalRequests.length
             const choice = await ctx.ui.select(

@@ -1,17 +1,20 @@
 import { describe, expect, test } from "bun:test"
 import { type Permission, type ConfigJson, makeRuleset, resolveRule } from "./ruleset"
 
-type TestRuleResult = [string, string, string, Permission] | [string, string, string, string, Permission]
+type TestPermission = Permission | `${Permission}!`
+type TestRuleResult = [string, string, string, TestPermission] | [string, string, string, string, TestPermission]
 function makeRulesetTest(homeDir: string, config: ConfigJson)
 : (cwd: string) => (tool: string, ...args: string[]) => TestRuleResult[] {
 
     const rules = makeRuleset(homeDir, config)
     return cwd => (tool, ...args) => {
         const matches = resolveRule(rules, { homeDir, stripDrive: true }, cwd, { op: tool, args })
-        return matches.map(m => m.toolRule.origin
-            ? [m.path, m.toolRule.origin, m.toolRule.pattern, m.pathRule.pattern, m.permission]
-            : [m.path, m.toolRule.pattern, m.pathRule.pattern, m.permission]
-        )
+        return matches.map(m => {
+            const permission: TestPermission = m.highSec ? `${m.permission}!` : m.permission
+            return m.toolRule.origin
+                ? [m.path, m.toolRule.origin, m.toolRule.pattern, m.pathRule.pattern, permission]
+                : [m.path, m.toolRule.pattern, m.pathRule.pattern, permission]
+        })
     }
 }
 
@@ -303,6 +306,183 @@ describe("implicit rules", () => {
         expect(resolveTest("rm", "src/index.ts", "dist/index.ts")).toStrictEqual([
             ["/proj/src/index.ts", "delete", expect.stringMatching(/^rm( |$)/), "src/**", "deny"],
             ["/proj/dist/index.ts", "write", expect.stringMatching(/^rm( |$)/), "dist/**", "ask"],
+        ])
+    })
+})
+
+describe("high-sec", () => {
+    test("high-priority: overrides normal rules regardless of order", () => {
+        const config: ConfigJson = {
+            paths: {
+                "*": "deny",
+                "~/.pi/settings.json": { "read": "allow!" },
+                "~/.pi/*": "ask",
+                "*.json": "ask",
+
+                "*.db": "ask",
+                "prod.db": { "*": "deny!", "read": "allow" },
+                "test.db": { "*": "allow!", "edit": "deny" },
+                "demo.db": { "edit": "deny!", "read": "allow" },
+            }
+        }
+        const resolveTest = makeRulesetTest("/users/rick", config)("/proj")
+        expect(resolveTest("read", "~/.pi/settings.json")).toStrictEqual([
+            ["/users/rick/.pi/settings.json", "read", "~/.pi/settings.json", "allow!"]
+        ])
+        expect(resolveTest("edit", "~/.pi/settings.json")).toStrictEqual([
+            ["/users/rick/.pi/settings.json", "*", "*.json", "ask"]
+        ])
+        expect(resolveTest("read", "~/.pi/auth.json")).toStrictEqual([
+            ["/users/rick/.pi/auth.json", "*", "*.json", "ask"]
+        ])
+        expect(resolveTest("read", "~/.pi/debug.log")).toStrictEqual([
+            ["/users/rick/.pi/debug.log", "*", "~/.pi/*", "ask"]
+        ])
+
+        expect(resolveTest("read", "prod.db")).toStrictEqual([
+            ["/proj/prod.db", "*", "prod.db", "deny!"]
+        ])
+        expect(resolveTest("edit", "test.db")).toStrictEqual([
+            ["/proj/test.db", "*", "test.db", "allow!"]
+        ])
+        expect(resolveTest("read", "demo.db")).toStrictEqual([
+            ["/proj/demo.db", "read", "demo.db", "allow"]
+        ])
+        expect(resolveTest("edit", "demo.db")).toStrictEqual([
+            ["/proj/demo.db", "edit", "demo.db", "deny!"]
+        ])
+        expect(resolveTest("read", "other.db")).toStrictEqual([
+            ["/proj/other.db", "*", "*.db", "ask"]
+        ])
+    })
+
+    describe("strict: most strict rule wins", () => {
+        test("allow vs ask vs deny", () => {
+            const config: ConfigJson = {
+                paths: {
+                    "~/**": { "*": "deny!" },
+                    ".ssh/**": { "*": "ask!" },
+                    "*.key": { "*": "allow!" },
+                }
+            }
+            const resolveTest = makeRulesetTest("/users/rick", config)("/proj")
+            expect(resolveTest("read", "~/.ssh/private.key")).toStrictEqual([
+                ["/users/rick/.ssh/private.key", "*", "~/**", "deny!"],
+            ])
+            expect(resolveTest("read", "~/private.key")).toStrictEqual([
+                ["/users/rick/private.key", "*", "~/**", "deny!"],
+            ])
+            expect(resolveTest("read", "~/.ssh/public.pub")).toStrictEqual([
+                ["/users/rick/.ssh/public.pub", "*", "~/**", "deny!"],
+            ])
+            expect(resolveTest("read", ".ssh/private.key")).toStrictEqual([
+                ["/proj/.ssh/private.key", "*", ".ssh/**", "ask!"],
+            ])
+            expect(resolveTest("read", ".ssh/public.pub")).toStrictEqual([
+                ["/proj/.ssh/public.pub", "*", ".ssh/**", "ask!"],
+            ])
+            expect(resolveTest("read", "private.key")).toStrictEqual([
+                ["/proj/private.key", "*", "*.key", "allow!"],
+            ])
+        })
+
+        test.each<[Permission, Permission]>([
+            ["allow", "allow"],
+            ["allow", "deny"],
+            ["allow", "ask"],
+            ["ask", "ask"],
+            ["ask", "deny"],
+            ["deny", "deny"],
+        ])("%s vs %s", (lessStrict, moreStrict) => {
+            const config: ConfigJson = {
+                paths: {
+                    "pa/*": { "read": `${moreStrict}!` },
+                    "pa/x": { "read": `${lessStrict}!` },
+                    "pb/*": { "read": `${lessStrict}!` },
+                    "pb/x": { "read": `${moreStrict}!` },
+                    "ta/x": { "*": `${moreStrict}!`, "read": `${lessStrict}!` },
+                    "tb/x": { "*": `${lessStrict}!`, "read": `${moreStrict}!` },
+                }
+            }
+            const differentPerm = lessStrict !== moreStrict
+            const resolveTest = makeRulesetTest("/users/rick", config)("/proj")
+            expect(resolveTest("read", "pa/x")).toStrictEqual([
+                ["/proj/pa/x", "read", differentPerm ? "pa/*" : "pa/x", `${moreStrict}!`]
+            ])
+            expect(resolveTest("read", "pb/x")).toStrictEqual([
+                ["/proj/pb/x", "read", "pb/x", `${moreStrict}!`]
+            ])
+            expect(resolveTest("read", "ta/x")).toStrictEqual([
+                ["/proj/ta/x", differentPerm ? "*" : "read", "ta/x", `${moreStrict}!`]
+            ])
+            expect(resolveTest("read", "tb/x")).toStrictEqual([
+                ["/proj/tb/x", "read", "tb/x", `${moreStrict}!`]
+            ])
+        })
+    })
+
+    test("resolved separately per path", () => {
+        const config: ConfigJson = {
+            paths: {
+                "*": "allow",
+                "~/.pi/auth.json": { "cat": "deny!" },
+                "*.json": "ask",
+            }
+        }
+        const resolveTest = makeRulesetTest("/users/rick", config)("/proj")
+        expect(resolveTest("cat", "~/.pi/settings.json", "~/.pi/auth.json", "package.json", "debug.log")).toStrictEqual([
+            ["/users/rick/.pi/settings.json", "*", "*.json", "ask"],
+            ["/users/rick/.pi/auth.json", "cat", "~/.pi/auth.json", "deny!"],
+            ["/proj/package.json", "*", "*.json", "ask"],
+            ["/proj/debug.log", "*", "*", "allow"],
+        ])
+    })
+
+    test("with shorthand syntax", () => {
+        const config: ConfigJson = {
+            paths: {
+                "*": "allow",
+                "~/.ssh/*": "writeonly!",
+                "~/.pi/*.json": "readonly!",
+                "*.json": "ask",
+            }
+        }
+        const resolveTest = makeRulesetTest("/users/rick", config)("/proj")
+        expect(resolveTest("write", "~/.pi/auth.json")).toStrictEqual([
+            ["/users/rick/.pi/auth.json", "write", "~/.pi/*.json", "deny!"]
+        ])
+        expect(resolveTest("read", "~/.pi/auth.json")).toStrictEqual([
+            ["/users/rick/.pi/auth.json", "*", "*.json", "ask"]
+        ])
+        expect(resolveTest("read", "~/.ssh/id_rsa")).toStrictEqual([
+            ["/users/rick/.ssh/id_rsa", "read", "~/.ssh/*", "deny!"]
+        ])
+        expect(resolveTest("write", "~/.ssh/id_rsa")).toStrictEqual([
+            ["/users/rick/.ssh/id_rsa", "*", "*", "allow"]
+        ])
+    })
+
+    test("affects implicit rules", () => {
+        const config: ConfigJson = {
+            paths: {
+                "*": "ask",
+                "p/*": { "write": "deny!" },
+                "p/x": { "edit": "allow" },
+                "t/x": { "write": "deny!", "edit": "allow" },
+            }
+        }
+        const resolveTest = makeRulesetTest("/users/rick", config)("/proj")
+        expect(resolveTest("edit", "p/x")).toStrictEqual([
+            ["/proj/p/x", "write", "edit", "p/*", "deny!"]
+        ])
+        expect(resolveTest("touch", "p/x")).toStrictEqual([
+            ["/proj/p/x", "write", expect.stringMatching(/^touch( |$)/), "p/*", "deny!"]
+        ])
+        expect(resolveTest("edit", "t/x")).toStrictEqual([
+            ["/proj/t/x", "write", "edit", "t/x", "deny!"]
+        ])
+        expect(resolveTest("touch", "t/x")).toStrictEqual([
+            ["/proj/t/x", "write", expect.stringMatching(/^touch( |$)/), "t/x", "deny!"]
         ])
     })
 })
