@@ -1,21 +1,52 @@
 import { loadConfig } from "./config-loading"
-import { makeRuleset, resolvePath, resolveRule } from "./ruleset"
+import { makeRuleset, resolvePath, resolveRule, type Ruleset } from "./ruleset"
 import { executionSimulation, sequenceScript, type Command } from "./tool-matching"
 
 import { getAgentDir, isToolCallEventType, type ExtensionAPI } from "@earendil-works/pi-coding-agent"
+import fs from "node:fs"
 import path from "node:path"
 import os from "node:os"
 
 export default function (pi: ExtensionAPI) {
     const configPath = path.join(getAgentDir(), "extensions", "pi-safeguards.json")
-    const config = loadConfig(configPath)
-    if (!config) { return }
-
-    // use same home as for the config
+    // note: getAgentDir() also uses homedir() instead of effective system user home
     const homeDir = resolvePath({}, os.homedir())
-    const rules = makeRuleset(homeDir, config)
+
+    let checkedInCurrentRequest = false
+    let configDate: number|undefined
+    let rules: Ruleset|undefined
+
+    function reloadConfigIfNeeded() {
+        if (checkedInCurrentRequest) return
+        checkedInCurrentRequest = true
+
+        const stat = fs.statSync(configPath, { throwIfNoEntry: false })
+        if (stat?.mtimeMs === configDate) return
+        configDate = stat?.mtimeMs
+
+        if (stat) {
+            const config = loadConfig(configPath)
+            if (config) {
+                rules = makeRuleset(homeDir, config)
+            }
+            // Keep current rules if config file was corrupted.
+            // E.g. is being edited right now. Or intentionally corrupted by Skynet.
+        } else {
+            rules = undefined
+        }
+    }
+
+    // ["context"]..thinking...["tool_call"]["tool_call"]["context"]...thinking...
+    // Only reload config once before first of multiple tool calls in current llm request.
+    // Use case: user sees bad tool calls and decides to modify config before next tool call.
+    pi.on("context", async () => {
+        checkedInCurrentRequest = false
+    })
 
 	pi.on("tool_call", async (event, ctx) => {
+        reloadConfigIfNeeded()
+        if (!rules) return undefined
+
         const actions: Command[] = []
         if (isToolCallEventType("bash", event)) {
             actions.push(...sequenceScript(event.input.command))

@@ -34,7 +34,6 @@
 - variadic num of paths in a single arg: `java -cp lib/a.jar:lib/b.jar:lib/c.jar`
 - allow exceptions affect implicit rules: "edit :! touch" - because "touch": "allow" is bad practice
 - concurrent call of multiple tools - check if rule resolutions displayed correctly for each
-- hot-reload config
 - validate config on load
 - command for ad-hoc in-session rules: `/safeguard deny grep * *:!~/*/**`
 - special "readonly" mode:
