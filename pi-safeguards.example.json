@@ -1,7 +1,7 @@
 {
     "paths": {
         "*": "askwrite",
-        "*:!~/**/*": { "grep": "ask", "find": "ask" },
+        "*:!~/**/*": { "grep *": "ask", "find (*)": "ask" },
         "./**/*": "allow",
 
         "pi-safeguards.json": "readonly!",
@@ -21,7 +21,7 @@
 
         ".git/**": "readonly",
 
-        "node_modules/**": "noedit",
+        "node_modules/*/*/**": "readonly",
         "package-lock.json": "noedit",
         "yarn.lock": "noedit",
         "bun.lock": "noedit",

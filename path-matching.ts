@@ -1,9 +1,3 @@
-// home and cwd are expected to be absolute
-export type PathMatcher = (home: string) => (cwd: string) => (target: string, isDir: boolean|undefined) => boolean
-
-export const matchAnything: PathMatcher = () => () => () => true
-export const matchAnyDirectory: PathMatcher = () => () => (_, isDir) => isDir !== false
-
 // segments is always non-empty, only first segment can be ""
 type NormalForm = { segments: string[], relativePrefixLen: number, onlyDir: boolean }
 
@@ -62,6 +56,17 @@ export function normalize(pattern: string): NormalForm {
     return { segments, relativePrefixLen, onlyDir }
 }
 
+export type PathMatcher = (home: string) => (cwd: string) => (target: string, isDir: boolean|undefined) => boolean
+
+export const matchAnything: PathMatcher = () => () => () => true
+export const matchAnyDirectory: PathMatcher = () => () => (_, isDir) => isDir !== false
+
+// For better performance in case of testing single target against many matchers,
+// matcher must not be expected to do resolution. As a result:
+// - "~", ".", and ".." in target are not special, and interpreted literally.
+// - Relative home/cwd/target aren't really treated as relative to anything.
+//   E.g. target "x" won't match pattern "./x".
+// If needed, any resolution must be done prior to calling matcher.
 export function makePathMatcher(pattern: string): PathMatcher {
     if (pattern.includes(":!")) {
         const matchers = pattern.split(":!").map(subPattern => makePathMatcher(subPattern))
@@ -110,7 +115,8 @@ export function makePathMatcher(pattern: string): PathMatcher {
             }
 
         } else {
-            const sep = i > relativePrefixLen ? "/" : ""
+            // note that `i` is always `> 0` for absolute or home/cwd-relative patterns
+            const sep = i > 0 ? "/" : ""
             if (segment === "*") {
                 regexParts.push(sep + "[^/]+")
             } else {
@@ -132,7 +138,8 @@ export function makePathMatcher(pattern: string): PathMatcher {
         const normalPrefixRegex = new RegExp(`(.*?)(?:(?:/|^)[^/]+){${childrenToCut}}/?$`)
         const normalPrefixMatch = normalPrefixRegex.exec(prefix)
         if (normalPrefixMatch === null) { return undefined }
-        return new RegExp("^" + normalPrefixMatch[1] + "(?:/|$)")
+        // don't consume trailing `/` because it is expected by the next segment pattern
+        return new RegExp("^" + normalPrefixMatch[1] + "(?=/|$)")
     }
 
     return home => {

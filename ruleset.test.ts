@@ -486,3 +486,107 @@ describe("high-sec", () => {
         ])
     })
 })
+
+test("real world example", async () => {
+    const config = await import("./pi-safeguards.example.json", { with: { type: 'json' } }) as ConfigJson
+    const resolveIn = makeRulesetTest("/users/rick", config)
+    const resolveTest = resolveIn("/users/rick/proj")
+
+    // Security
+
+    expect(resolveTest("cat", "~/.ssh/id_rsa")).toStrictEqual([
+        ["/users/rick/.ssh/id_rsa", "*", ".ssh/**:!*.pub", "deny!"]
+    ])
+    expect(resolveIn("/users/rick/.ssh")("cat", "id_rsa")).toStrictEqual([
+        ["/users/rick/.ssh/id_rsa", "*", ".ssh/**:!*.pub", "deny!"]
+    ])
+    expect(resolveTest("read", "~/.ssh/id_rsa.pub")).toStrictEqual([])
+    expect(resolveTest("write", "~/.ssh/id_rsa.pub")).toStrictEqual([
+        ["/users/rick/.ssh/id_rsa.pub", "write", ".ssh/**/*.pub", "deny"]
+    ])
+    expect(resolveTest("cat", "~/.pi/agent/auth.json", "prod.env", "prod.env.example")).toStrictEqual([
+        ["/users/rick/.pi/agent/auth.json", "*", ".pi/agent/auth.json", "deny!"],
+        ["/users/rick/proj/prod.env", "*", "*.env", "deny"],
+        ["/users/rick/proj/prod.env.example", "*", "./**/*", "allow"],
+    ])
+    expect(resolveTest("read", "~/.pi/agent/extensions/pi-safeguards.json")).toStrictEqual([])
+    expect(resolveTest("rm", "~/.pi/agent/extensions/pi-safeguards.json")).toStrictEqual([
+        [
+            "/users/rick/.pi/agent/extensions/pi-safeguards.json",
+            "write", expect.stringMatching(/^rm( |$)/), "pi-safeguards.json", "deny!"
+        ],
+    ])
+
+    // Overly broad search
+
+    expect(resolveTest("find", "/")).toStrictEqual([
+        ["/", "find (*)", "*:!~/**/*", "ask"]
+    ])
+    expect(resolveTest("find", "/users/rick")).toStrictEqual([
+        ["/users/rick", "find (*)", "*:!~/**/*", "ask"]
+    ])
+    expect(resolveTest("find", "/users/rick/.bun")).toStrictEqual([])
+    expect(resolveTest("find", "/users/rick/proj")).toStrictEqual([])
+    // #todo: ignore grep pattern (e.g. by implementing "definitions" section):
+    // expect(resolveTest("grep", ".ssh/something", "/users/rick/.bun")).toStrictEqual([])
+    // expect(resolveTest("grep", "something", "/users/rick/proj")).toStrictEqual([])
+    // expect(resolveTest("grep", "something", "/users/rick")).toStrictEqual([
+    //     ["/users/rick", "grep *", "*:!~/**/*", "ask"]
+    // ])
+
+    // Making changes outside current directory
+
+    expect(resolveTest("read", "/users/rick/.bun/install/global/node_modules/iseven/index.js")).toStrictEqual([])
+    expect(resolveTest("write", "/usr/local/bin/node")).toStrictEqual([
+        ["/usr/local/bin/node", "write", "*", "ask"]
+    ])
+    expect(resolveTest("edit", "/etc/passwd")).toStrictEqual([
+        ["/etc/passwd", "write", "edit", "*", "ask"]
+    ])
+    expect(resolveTest("read", "~/.pi/agent/settings.json")).toStrictEqual([])
+    expect(resolveTest("edit", "~/.pi/agent/settings.json")).toStrictEqual([
+        ["/users/rick/.pi/agent/settings.json", "write", "edit", "*", "ask"]
+    ])
+
+    // Inappropriate ways to do something
+
+    expect(resolveTest("rm", "-rf", ".git")).toStrictEqual([
+        ["/users/rick/proj/.git", "write", expect.stringMatching(/^rm( |$)/), ".git/**", "deny"]
+    ])
+    expect(resolveTest("rm", ".git/refs/heads/main")).toStrictEqual([
+        [
+            "/users/rick/proj/.git/refs/heads/main",
+            "write", expect.stringMatching(/^rm( |$)/), ".git/**", "deny"
+        ],
+    ])
+    expect(resolveTest("read", ".git/refs/heads/main")).toStrictEqual([
+        ["/users/rick/proj/.git/refs/heads/main", "*", "./**/*", "allow"]
+    ])
+    expect(resolveTest("edit", ".git/refs/heads/main")).toStrictEqual([
+        ["/users/rick/proj/.git/refs/heads/main", "write", "edit", ".git/**", "deny"]
+    ])
+
+    expect(resolveTest("read", "node_modules/iseven/dist/index.js")).toStrictEqual([
+        ["/users/rick/proj/node_modules/iseven/dist/index.js", "*", "./**/*", "allow"]
+    ])
+    expect(resolveTest("edit", "node_modules/iseven/dist/index.js")).toStrictEqual([
+        [
+            "/users/rick/proj/node_modules/iseven/dist/index.js",
+            "write", "edit", "node_modules/*/*/**", "deny"
+        ]
+    ])
+    expect(resolveTest("rm", "-rf", "node_modules/iseven/package.json", "node_modules/iseven", "node_modules")).toStrictEqual([
+        [
+            "/users/rick/proj/node_modules/iseven/package.json",
+            "write", expect.stringMatching(/^rm( |$)/), "node_modules/*/*/**", "deny"
+        ],
+        ["/users/rick/proj/node_modules/iseven", "*", "./**/*", "allow"],
+        ["/users/rick/proj/node_modules", "*", "./**/*", "allow"],
+    ])
+    expect(resolveTest("edit", "package-lock.json")).toStrictEqual([
+        ["/users/rick/proj/package-lock.json", "edit", "package-lock.json", "deny"]
+    ])
+    expect(resolveTest("rm", "package-lock.json")).toStrictEqual([
+        ["/users/rick/proj/package-lock.json", "*", "./**/*", "allow"]
+    ])
+})

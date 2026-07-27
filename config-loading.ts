@@ -1,4 +1,4 @@
-import { ConfigJson } from "./ruleset"
+import { type ConfigJson } from "./ruleset"
 import fs from "node:fs"
 
 export function loadConfig(path: string): ConfigJson|undefined {

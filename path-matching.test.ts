@@ -217,6 +217,14 @@ describe("wildcards", () => {
             expect(matcher("src", undefined)).toBe(false)
         })
 
+        test("/* matches only absolute paths", () => {
+            const matcher = makePathMatcher("/*")("/home")("/proj")
+            expect(matcher("/root", undefined)).toBe(true)
+            expect(matcher("notroot", undefined)).toBe(false)
+            expect(matcher("/root/nested", undefined)).toBe(false)
+            expect(matcher("notroot/nested", undefined)).toBe(false)
+        })
+
         test("singleton * matches everything", () => {
             const matcher = makePathMatcher("*")("/home")("/proj")
             expect(matcher("file.ts", undefined)).toBe(true)
@@ -259,8 +267,8 @@ describe("wildcards", () => {
             expect(matcher("srcccc", undefined)).toBe(false)
         })
 
-        test("trailing x/**/* matches only children", () => {
-            const matcher = makePathMatcher("src/**/*")("/home")("/proj")
+        test.each(["/**/*", "/*/**"])("trailing x%s matches only children", (suffix) => {
+            const matcher = makePathMatcher("src" + suffix)("/home")("/proj")
             expect(matcher("src", undefined)).toBe(false)
             expect(matcher("src/", undefined)).toBe(false)
             expect(matcher("src/test.ts", undefined)).toBe(true)
@@ -268,7 +276,15 @@ describe("wildcards", () => {
             expect(matcher("other/test.ts", undefined)).toBe(false)
         })
 
-        test("trailing /**/*/**/* matches at least 2 segment long paths", () => {
+        test("/**/* matches both absolute and relative paths", () => {
+            const matcher = makePathMatcher("/**/*")("/home")("/proj")
+            expect(matcher("src", undefined)).toBe(true)
+            expect(matcher("src/deeply/nested/test.ts", undefined)).toBe(true)
+            expect(matcher("/root", undefined)).toBe(true)
+            expect(matcher("/deeply/nested/test.ts", undefined)).toBe(true)
+        })
+
+        test("/**/*/**/* matches at least 2 segment long paths", () => {
             const matcher = makePathMatcher("/**/*/**/*")("/home")("/proj")
             expect(matcher("src", undefined)).toBe(false)
             expect(matcher("src/", undefined)).toBe(false)
@@ -424,6 +440,23 @@ describe("directory check", () => {
         expect(matcher("src/", undefined)).toBe(true)
     })
 
+    test("trailing /*/** -> required segment matches only a potential directory", () => {
+        const matcher = makePathMatcher("src/*/**")("/home")("/proj")
+        expect(matcher("src/dir", true)).toBe(true)
+        expect(matcher("src/file", false)).toBe(false)
+        expect(matcher("src/something", undefined)).toBe(true)
+        expect(matcher("src/nested/something", false)).toBe(true)
+    })
+
+    test("trailing /**/* -> required segment matches both files and directories", () => {
+        const matcher = makePathMatcher("src/**/*")("/home")("/proj")
+        expect(matcher("src/dir", true)).toBe(true)
+        expect(matcher("src/file", false)).toBe(true)
+        expect(matcher("src/something", undefined)).toBe(true)
+        expect(matcher("src/nested/something", false)).toBe(true)
+        expect(matcher("src", undefined)).toBe(false)
+    })
+
     test("*:!*/ -> matches only paths known to be files", () => {
         const matcher = makePathMatcher("*:!*/")("/home")("/proj")
         expect(matcher("src/file", false)).toBe(true)
@@ -516,6 +549,15 @@ describe("cwd", () => {
         expect(matcher("/proj")("file", undefined)).toBe(false)
     })
 
+    test.each(["./**/*", "./*/**"])("%s -> matches only children of cwd", pattern => {
+        const matcher = makePathMatcher(pattern)("/home")
+        expect(matcher("/proj")("/proj", undefined)).toBe(false)
+        expect(matcher("/proj")("/proj/src", undefined)).toBe(true)
+        expect(matcher("/proj")("/proj/src/file", undefined)).toBe(true)
+        expect(matcher("/proj")("/any/where/else", undefined)).toBe(false)
+        expect(matcher("/proj")("file", undefined)).toBe(false)
+    })
+
     test("/* gets consumed by ..", () => {
         const matcher = makePathMatcher("src/*/..")("/home")
         expect(matcher("/proj")("/proj", undefined)).toBe(false)
@@ -543,6 +585,14 @@ describe("cwd", () => {
         const matcher = makePathMatcher("src/config/../")("/home")
         expect(matcher("/proj")("src", false)).toBe(false)
         expect(matcher("/proj")("src", true)).toBe(true)
+    })
+
+    test("cwd is root", () => {
+        const matcher = makePathMatcher("./path")("/home")("/")
+        expect(matcher("/path", undefined)).toBe(true)
+        expect(matcher("/home/path", undefined)).toBe(false)
+        expect(matcher("path", undefined)).toBe(false)
+        expect(matcher("./path", undefined)).toBe(false)
     })
 })
 
@@ -573,6 +623,15 @@ describe("home", () => {
     test("~/** -> matches anything within home only", () => {
         const matcher = makePathMatcher("~/**")("/home")("/proj")
         expect(matcher("/home", undefined)).toBe(true)
+        expect(matcher("/home/file", undefined)).toBe(true)
+        expect(matcher("/home/nested/file", undefined)).toBe(true)
+        expect(matcher("/proj/file", undefined)).toBe(false)
+        expect(matcher("/file", undefined)).toBe(false)
+    })
+
+    test.each(["~/**/*", "~/*/**"])("%s -> matches only children of home", pattern => {
+        const matcher = makePathMatcher(pattern)("/home")("/proj")
+        expect(matcher("/home", undefined)).toBe(false)
         expect(matcher("/home/file", undefined)).toBe(true)
         expect(matcher("/home/nested/file", undefined)).toBe(true)
         expect(matcher("/proj/file", undefined)).toBe(false)
